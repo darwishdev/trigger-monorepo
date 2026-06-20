@@ -5,6 +5,7 @@
     <span>Trigger AI</span>
   </a>
   <a class="link {{if eq .Active "home"}}active{{end}}" href="/" hx-get="/" hx-target="#content" hx-swap="innerHTML" hx-push-url="true">Dashboard</a>
+  <a class="link {{if eq .Active "activities"}}active{{end}}" href="/activities" hx-get="/activities" hx-target="#content" hx-swap="innerHTML" hx-push-url="true">Activities</a>
 </nav>
 {{end}}
 

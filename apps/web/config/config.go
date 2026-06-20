@@ -15,6 +15,13 @@ type Config struct {
 	BaseURL      string `mapstructure:"BASE_URL"`
 	DatabaseURL  string `mapstructure:"DATABASE_URL"`
 	WorkOSAPIKey string `mapstructure:"WORKOS_API_KEY"`
+
+	// CRM config drives the default tenant's client until the identity
+	// domain lands and supplies per-tenant configs. Optional here so config
+	// loading stays decoupled from CRM availability.
+	CRMProvider string `mapstructure:"CRM_PROVIDER"`
+	CRMBaseURL  string `mapstructure:"CRM_BASE_URL"`
+	CRMAPIKey   string `mapstructure:"CRM_API_KEY"`
 }
 
 func LoadConfig(configDir string) (Config, error) {
@@ -33,8 +40,9 @@ func LoadConfig(configDir string) (Config, error) {
 	loader := viper.New()
 	loader.SetConfigType("env")
 	loader.SetDefault("PORT", "8080")
+	loader.SetDefault("CRM_PROVIDER", "odoo")
 	loader.AutomaticEnv()
-	for _, key := range []string{"STATE", "PORT", "BASE_URL", "DATABASE_URL", "WORKOS_API_KEY"} {
+	for _, key := range []string{"STATE", "PORT", "BASE_URL", "DATABASE_URL", "WORKOS_API_KEY", "CRM_PROVIDER", "CRM_BASE_URL", "CRM_API_KEY"} {
 		if err := loader.BindEnv(key); err != nil {
 			return Config{}, fmt.Errorf("bind env %s: %w", key, err)
 		}

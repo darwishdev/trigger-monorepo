@@ -126,7 +126,7 @@ func writeConfigFiles(t *testing.T, files map[string]string) string {
 func clearConfigEnv(t *testing.T) {
 	t.Helper()
 
-	for _, key := range []string{"STATE", "PORT", "BASE_URL", "DATABASE_URL", "WORKOS_API_KEY"} {
+	for _, key := range []string{"STATE", "PORT", "BASE_URL", "DATABASE_URL", "WORKOS_API_KEY", "CRM_PROVIDER", "CRM_BASE_URL", "CRM_API_KEY"} {
 		t.Setenv(key, "")
 	}
 }
