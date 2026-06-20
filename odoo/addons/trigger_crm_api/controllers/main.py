@@ -1,3 +1,4 @@
+import base64
 import json
 
 from odoo import fields, http
@@ -17,6 +18,85 @@ class TriggerCrmApi(http.Controller):
         limit = min(max(int(params.get("limit", 80)), 1), 500)
         offset = max(int(params.get("offset", 0)), 0)
         return limit, offset
+
+    # ------------------------------------------------------------------ #
+    #  keyset pagination helpers (used by list_activities)
+    # ------------------------------------------------------------------ #
+    # Sortable columns for activity keyset pagination. The cursor needs a real
+    # stored column with a unique id tiebreaker; non-stored/computed fields
+    # (like 'state') are deliberately excluded.
+    ACTIVITY_SORT_FIELDS = ("date_deadline", "id")
+    ACTIVITY_DEFAULT_SORT = "date_deadline"
+
+    @staticmethod
+    def _page_size(params):
+        """Parse page_size for keyset pagination (default 50, clamped 1..500)."""
+        try:
+            size = int(params.get("page_size", 50))
+        except (TypeError, ValueError):
+            raise ValueError("page_size must be an integer")
+        return min(max(size, 1), 500)
+
+    @staticmethod
+    def _activity_sort(name):
+        """Validate the requested sort field against the allowlist."""
+        sort = (name or "").strip()
+        return sort if sort in TriggerCrmApi.ACTIVITY_SORT_FIELDS else TriggerCrmApi.ACTIVITY_DEFAULT_SORT
+
+    @staticmethod
+    def _activity_state_domain(state):
+        """Return a date_deadline-based domain leaf for the requested state.
+
+        mail.activity.state is a non-stored computed field and cannot be
+        searched directly, so overdue/today/planned are mapped to date_deadline
+        ranges relative to today. Raises ValueError on an unknown state.
+        """
+        if not state:
+            return None
+        if state not in ("overdue", "today", "planned"):
+            raise ValueError("state must be overdue/today/planned")
+        today = fields.Date.context_today(request.env.user)
+        if state == "overdue":
+            return ("date_deadline", "<", today)
+        if state == "today":
+            return ("date_deadline", "=", today)
+        return ("date_deadline", ">", today)
+
+    @staticmethod
+    def _encode_scroll_token(sort, direction, value, last_id):
+        """Encode an opaque keyset cursor: base64(json {s, d, v, i})."""
+        payload = json.dumps({"s": sort, "d": direction, "v": value, "i": last_id})
+        return base64.b64encode(payload.encode()).decode()
+
+    @staticmethod
+    def _decode_scroll_token(token, sort, direction):
+        """Decode a keyset cursor, validating its sort/dir match the request.
+
+        Returns (value, last_id) or None when the token is missing, malformed,
+        or was issued for a different sort/dir (a sort/filter change restarts
+        the scroll from the beginning).
+        """
+        if not token:
+            return None
+        try:
+            payload = json.loads(base64.b64decode(token.encode()).decode())
+        except (ValueError, TypeError):
+            return None
+        if payload.get("s") != sort or payload.get("d") != direction:
+            return None
+        return payload.get("v"), payload.get("i")
+
+    @staticmethod
+    def _keyset_continuation(sort, direction, last_value, last_id):
+        """Build the keyset 'after this cursor' domain leaves.
+
+        Implements (sort, id) > (last_value, last_id) for asc, or < for desc,
+        expanded because Odoo domains cannot do row-tuple comparison in one term
+        - OR( AND(sort=value, id cmp last_id), sort cmp value ).
+        """
+        cmp = ">" if direction == "asc" else "<"
+        value = int(last_value) if sort == "id" else last_value
+        return ["|", "&", (sort, "=", value), ("id", cmp, int(last_id)), (sort, cmp, value)]
 
     # ------------------------------------------------------------------ #
     #  Leads
@@ -195,11 +275,28 @@ class TriggerCrmApi(http.Controller):
     # ------------------------------------------------------------------ #
     @http.route("/api/activities", type="http", auth="bearer", methods=["GET"], csrf=False)
     def list_activities(self, **params):
+        """List follow-up activities with keyset (scroll_token) pagination.
+
+        Query params:
+          scroll_token   opaque cursor returned as next_scroll_token
+          page_size      page size (default 50, clamped 1..500)
+          sort           date_deadline (default) | id
+          dir            asc (default) | desc
+          state          overdue | today | planned (mapped to date_deadline)
+          activity_type  activity type name, e.g. Call / Email / Meeting
+          user, lead     integer ids (optional filters)
+
+        The total count is returned only on the first page (no scroll_token)
+        so scrolling does not re-run a COUNT on every request.
+        """
         Activity = request.env["mail.activity"]
         try:
-            limit, offset = self._page(params)
-        except (TypeError, ValueError):
-            return request.make_json_response({"error": "limit/offset must be integers"}, status=400)
+            page_size = self._page_size(params)
+        except ValueError as exc:
+            return request.make_json_response({"error": str(exc)}, status=400)
+
+        sort = self._activity_sort(params.get("sort"))
+        direction = "desc" if (params.get("dir") or "asc").lower() == "desc" else "asc"
 
         domain = [("res_model", "=", params.get("model") or "crm.lead")]
         if params.get("user"):
@@ -212,26 +309,36 @@ class TriggerCrmApi(http.Controller):
                 domain.append(("res_id", "=", int(params["lead"])))
             except ValueError:
                 return request.make_json_response({"error": "lead must be an integer id"}, status=400)
-        state = params.get("state")
-        if state:
-            if state not in ("overdue", "today", "planned"):
-                return request.make_json_response({"error": "state must be overdue/today/planned"}, status=400)
-            # mail.activity.state is a non-stored computed field and cannot be
-            # searched directly; filter on date_deadline relative to today.
-            today = fields.Date.context_today(request.env.user)
-            if state == "overdue":
-                domain.append(("date_deadline", "<", today))
-            elif state == "today":
-                domain.append(("date_deadline", "=", today))
-            else:  # planned
-                domain.append(("date_deadline", ">", today))
+        try:
+            state_leaf = self._activity_state_domain(params.get("state"))
+        except ValueError as exc:
+            return request.make_json_response({"error": str(exc)}, status=400)
+        if state_leaf:
+            domain.append(state_leaf)
+        if params.get("activity_type"):
+            domain.append(("activity_type_id.name", "=", params["activity_type"]))
 
-        total = Activity.search_count(domain)
-        records = Activity.search(domain, limit=limit, offset=offset, order="date_deadline asc")
-        return request.make_json_response({
-            "count": total, "limit": limit, "offset": offset,
-            "results": [self._serialize_activity(r) for r in records],
-        })
+        body = {}
+        # Count is only returned on the first page; scrolling skips the COUNT.
+        if not params.get("scroll_token"):
+            body["count"] = Activity.search_count(domain)
+
+        cursor = self._decode_scroll_token(params.get("scroll_token"), sort, direction)
+        if cursor is not None:
+            last_value, last_id = cursor
+            domain += self._keyset_continuation(sort, direction, last_value, last_id)
+
+        order = "{} {}, id {}".format(sort, direction, direction)
+        records = Activity.search(domain, limit=page_size + 1, order=order)
+        has_more = len(records) > page_size
+        records = records[:page_size]
+        if has_more:
+            last = records[-1]
+            cursor_value = last.id if sort == "id" else fields.Date.to_string(last[sort])
+            body["next_scroll_token"] = self._encode_scroll_token(sort, direction, cursor_value, last.id)
+
+        body["results"] = [self._serialize_activity(r) for r in records]
+        return request.make_json_response(body)
 
     @http.route("/api/activities", type="http", auth="bearer", methods=["POST"], csrf=False)
     def create_activity(self, **params):
