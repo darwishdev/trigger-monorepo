@@ -115,6 +115,69 @@
       width: min(56rem, 100%);
       margin: 0 auto;
     }
+    .filters {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .5rem;
+      margin: 1.5rem 0 1.25rem;
+    }
+    .chip {
+      padding: .4rem .8rem;
+      border: 1px solid #c9d8d4;
+      border-radius: 999px;
+      background: #ffffff;
+      color: #51615d;
+      font-size: .9rem;
+      cursor: pointer;
+    }
+    .chip:hover { background: #e6fbf7; color: #0d1b18; }
+    .chip.active { background: #0d1b18; color: #ffffff; border-color: #0d1b18; }
+    .activity-list { display: flex; flex-direction: column; gap: .6rem; }
+    .activity {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: .9rem 1rem;
+      border: 1px solid #dde6e3;
+      border-radius: 12px;
+      background: #ffffff;
+    }
+    .activity-title { font-weight: 600; }
+    .activity-meta {
+      margin-top: .2rem;
+      display: flex;
+      gap: .35rem;
+      color: #6b7875;
+      font-size: .9rem;
+    }
+    .activity-side {
+      display: inline-flex;
+      align-items: center;
+      gap: .6rem;
+      color: #6b7875;
+      font-size: .9rem;
+    }
+    .badge {
+      padding: .25rem .55rem;
+      border-radius: 999px;
+      font-size: .78rem;
+      font-weight: 600;
+      text-transform: capitalize;
+    }
+    .badge-overdue { background: #fdecec; color: #b3261e; }
+    .badge-today { background: #fff4e0; color: #9a6700; }
+    .badge-planned { background: #e6fbf7; color: #24796f; }
+    .empty { color: #6b7875; }
+    .filter-selects { display: contents; }
+    select.chip {
+      appearance: none;
+      padding-right: 1.4rem;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2351615d' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right .5rem center;
+      cursor: pointer;
+    }
   </style>
 </head>
 <body>

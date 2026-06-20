@@ -1,0 +1,82 @@
+{{define "content"}}
+<section class="shell">
+  <p class="eyebrow">Sales</p>
+  <h1>Follow-up activities</h1>
+  {{if .Total}}<p id="activity-count">Showing {{.LoadedSoFar}} of {{.Total}} scheduled activities.</p>{{end}}
+
+  <div class="filters">
+    <a class="chip{{if eq .State ""}} active{{end}}"
+       href="/activities?type={{.Type}}&sort={{.Sort}}&dir={{.Dir}}"
+       hx-get="/activities?type={{.Type}}&sort={{.Sort}}&dir={{.Dir}}"
+       hx-target="#content" hx-swap="innerHTML" hx-push-url="true">All</a>
+    <a class="chip{{if eq .State "overdue"}} active{{end}}"
+       href="/activities?state=overdue&type={{.Type}}&sort={{.Sort}}&dir={{.Dir}}"
+       hx-get="/activities?state=overdue&type={{.Type}}&sort={{.Sort}}&dir={{.Dir}}"
+       hx-target="#content" hx-swap="innerHTML" hx-push-url="true">Overdue</a>
+    <a class="chip{{if eq .State "today"}} active{{end}}"
+       href="/activities?state=today&type={{.Type}}&sort={{.Sort}}&dir={{.Dir}}"
+       hx-get="/activities?state=today&type={{.Type}}&sort={{.Sort}}&dir={{.Dir}}"
+       hx-target="#content" hx-swap="innerHTML" hx-push-url="true">Today</a>
+    <a class="chip{{if eq .State "planned"}} active{{end}}"
+       href="/activities?state=planned&type={{.Type}}&sort={{.Sort}}&dir={{.Dir}}"
+       hx-get="/activities?state=planned&type={{.Type}}&sort={{.Sort}}&dir={{.Dir}}"
+       hx-target="#content" hx-swap="innerHTML" hx-push-url="true">Planned</a>
+
+    <form class="filter-selects"
+          hx-get="/activities"
+          hx-target="#content"
+          hx-swap="innerHTML"
+          hx-push-url="true"
+          hx-trigger="change">
+      <input type="hidden" name="state" value="{{.State}}">
+      <select name="type" class="chip">
+        <option value="" {{if eq .Type ""}}selected{{end}}>All types</option>
+        <option value="Call"    {{if eq .Type "Call"}}selected{{end}}>Call</option>
+        <option value="Email"   {{if eq .Type "Email"}}selected{{end}}>Email</option>
+        <option value="Meeting" {{if eq .Type "Meeting"}}selected{{end}}>Meeting</option>
+        <option value="To-Do"   {{if eq .Type "To-Do"}}selected{{end}}>To-Do</option>
+      </select>
+      <select name="sort" class="chip">
+        <option value=""             {{if eq .Sort ""}}selected{{end}}>Sort: Deadline</option>
+        <option value="id"           {{if eq .Sort "id"}}selected{{end}}>Sort: ID</option>
+      </select>
+      <select name="dir" class="chip">
+        <option value="asc"  {{if eq .Dir "asc"}}selected{{end}}>Asc</option>
+        <option value="desc" {{if eq .Dir "desc"}}selected{{end}}>Desc</option>
+      </select>
+    </form>
+  </div>
+
+  <div class="activity-list" id="activity-list">
+    {{template "activity-rows" .}}
+  </div>
+</section>
+{{end}}
+
+{{define "activity-rows"}}
+{{if .Total}}<p id="activity-count" hx-swap-oob="true">Showing {{.LoadedSoFar}} of {{.Total}} scheduled activities.</p>{{end}}
+{{range .Result.Items}}
+<article class="activity">
+  <div class="activity-main">
+    <div class="activity-title">{{or .Summary .Type}}</div>
+    <div class="activity-meta">
+      {{if .Type}}<span>{{.Type}}</span>{{end}}
+      {{if .Lead}}<span>· {{.Lead}}</span>{{end}}
+      {{if .User}}<span>· {{.User}}</span>{{end}}
+    </div>
+  </div>
+  <div class="activity-side">
+    <span class="badge badge-{{.State}}">{{.State}}</span>
+    {{if not .Deadline.IsZero}}<time>{{.Deadline.Format "Jan 2"}}</time>{{end}}
+  </div>
+</article>
+{{else}}
+<p class="empty">No activities found.</p>
+{{end}}
+{{if .Result.NextToken}}
+<div hx-get="/activities?scroll_token={{.Result.NextToken}}&state={{.State}}&type={{.Type}}&sort={{.Sort}}&dir={{.Dir}}&loaded={{.LoadedSoFar}}&total={{.Total}}"
+     hx-trigger="intersect once"
+     hx-target="this"
+     hx-swap="outerHTML"></div>
+{{end}}
+{{end}}
