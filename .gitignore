@@ -1,0 +1,43 @@
+# OS/editor noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Go
+bin/
+coverage.out
+*.test
+
+# Python/Odoo generated files
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# Odoo runtime/test output
+odoo/api_tests/responses/
+
+# Local environment overrides
+*.local.env
+.env
+.env.*
+!.env.example
+
+# Node/package-manager artifacts if tooling is added later
+node_modules/
+dist/
+build/
+
+# Mobile build outputs if apps are added later
+*.apk
+*.aab
+*.ipa
+DerivedData/
+.gradle/
+android/.gradle/
+ios/DerivedData/
