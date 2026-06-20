@@ -27,6 +27,8 @@ odoo/api_tests/responses/
 .env
 .env.*
 !.env.example
+apps/web/config/dev.env
+apps/web/config/prod.env
 
 # Node/package-manager artifacts if tooling is added later
 node_modules/

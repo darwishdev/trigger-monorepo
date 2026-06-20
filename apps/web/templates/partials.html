@@ -1,0 +1,15 @@
+{{define "nav"}}
+<nav>
+  <a class="brand" href="/" hx-get="/" hx-target="#content" hx-swap="innerHTML" hx-push-url="true">
+    <img src="/static/logo.svg" alt="Trigger">
+    <span>Trigger AI</span>
+  </a>
+  <a class="link {{if eq .Active "home"}}active{{end}}" href="/" hx-get="/" hx-target="#content" hx-swap="innerHTML" hx-push-url="true">Dashboard</a>
+</nav>
+{{end}}
+
+{{define "footer"}}
+<footer>
+  <div class="inner">Trigger AI web shell</div>
+</footer>
+{{end}}
