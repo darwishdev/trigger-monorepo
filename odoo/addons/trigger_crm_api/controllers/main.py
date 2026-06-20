@@ -1,6 +1,6 @@
 import json
 
-from odoo import http
+from odoo import fields, http
 from odoo.http import request
 
 
@@ -216,7 +216,15 @@ class TriggerCrmApi(http.Controller):
         if state:
             if state not in ("overdue", "today", "planned"):
                 return request.make_json_response({"error": "state must be overdue/today/planned"}, status=400)
-            domain.append(("state", "=", state))
+            # mail.activity.state is a non-stored computed field and cannot be
+            # searched directly; filter on date_deadline relative to today.
+            today = fields.Date.context_today(request.env.user)
+            if state == "overdue":
+                domain.append(("date_deadline", "<", today))
+            elif state == "today":
+                domain.append(("date_deadline", "=", today))
+            else:  # planned
+                domain.append(("date_deadline", ">", today))
 
         total = Activity.search_count(domain)
         records = Activity.search(domain, limit=limit, offset=offset, order="date_deadline asc")
