@@ -1,0 +1,281 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data noupdate="1">
+
+        <!-- ======================================================= -->
+        <!-- Lead sources (UTM) - defined here because stock Odoo     -->
+        <!-- only ships ad/social sources, not these direct channels. -->
+        <!-- ======================================================= -->
+        <record id="source_website" model="utm.source">
+            <field name="name">Website</field>
+        </record>
+        <record id="source_phone" model="utm.source">
+            <field name="name">Phone Call</field>
+        </record>
+        <record id="source_email" model="utm.source">
+            <field name="name">Email</field>
+        </record>
+        <record id="source_referral" model="utm.source">
+            <field name="name">Referral</field>
+        </record>
+
+        <!-- ======================================================= -->
+        <!-- Extra pipeline stage: Negotiation (stock Odoo ships New, -->
+        <!-- Qualified, Proposition, Won) - sequenced before Won.     -->
+        <!-- ======================================================= -->
+        <record id="stage_negotiation" model="crm.stage">
+            <field name="name">Negotiation</field>
+            <field name="sequence">4</field>
+        </record>
+
+        <!-- ======================================================= -->
+        <!-- LEADS  (type = lead)  - unqualified incoming inquiries   -->
+        <!-- ======================================================= -->
+
+        <record id="lead_inquiry_1" model="crm.lead">
+            <field name="name">Website inquiry - 2BR apartment in New Cairo</field>
+            <field name="type">lead</field>
+            <field name="partner_id" ref="partner_buyer_robert"/>
+            <field name="contact_name">Omar Tarek</field>
+            <field name="email_from">omar.tarek@example.com</field>
+            <field name="phone">+20 100 555 0355</field>
+            <field name="description">Saw the New Cairo listing on the Trigger website. Looking for a 2-bedroom apartment with a balcony, budget up to EGP 6,500,000. Prefers a high floor. Available for a viewing next week.</field>
+            <field name="stage_id" ref="crm.stage_lead1"/>
+            <field name="user_id" ref="base.user_admin"/>
+            <field name="priority">1</field>
+            <field name="tag_ids" eval="[(6, 0, [ref('crm_tag_residential_sale'), ref('crm_tag_first_time_buyer')])]"/>
+            <field name="suggested_category_ids" eval="[(6, 0, [ref('trigger_estate.project_mivida')])]"/>
+            <field name="source_id" ref="source_website"/>
+            <field name="medium_id" ref="utm.utm_medium_website"/>
+        </record>
+
+        <record id="lead_inquiry_2" model="crm.lead">
+            <field name="name">Phone call - interested in North Coast rental</field>
+            <field name="type">lead</field>
+            <field name="partner_id" ref="partner_buyer_emily"/>
+            <field name="contact_name">Yara Hassan</field>
+            <field name="email_from">yara.hassan@example.com</field>
+            <field name="phone">+20 100 555 0344</field>
+            <field name="description">Relocating from abroad, needs a furnished North Coast (Sahel) rental (EGP 40k-60k/month) for the summer season starting in two months. Has two small dogs.</field>
+            <field name="stage_id" ref="crm.stage_lead1"/>
+            <field name="user_id" ref="base.user_admin"/>
+            <field name="priority">2</field>
+            <field name="tag_ids" eval="[(6, 0, [ref('crm_tag_rental'), ref('crm_tag_waterfront')])]"/>
+            <field name="suggested_category_ids" eval="[(6, 0, [ref('trigger_estate.project_marassi'), ref('trigger_estate.project_hacienda')])]"/>
+            <field name="source_id" ref="source_phone"/>
+            <field name="medium_id" ref="utm.utm_medium_phone"/>
+        </record>
+
+        <record id="lead_inquiry_3" model="crm.lead">
+            <field name="name">Email - commercial office space in the New Capital</field>
+            <field name="type">lead</field>
+            <field name="partner_id" ref="partner_buyer_chen_corp"/>
+            <field name="contact_name">Mostafa El-Saeed</field>
+            <field name="email_from">office@elsaeedholding.com</field>
+            <field name="phone">+20 2 2480 0333</field>
+            <field name="description">El-Saeed Holding is expanding and needs 300-500 m2 of Class A office space in the New Administrative Capital. Looking to sign a 3-year lease within 60 days.</field>
+            <field name="stage_id" ref="crm.stage_lead1"/>
+            <field name="user_id" ref="base.user_admin"/>
+            <field name="priority">1</field>
+            <field name="tag_ids" eval="[(6, 0, [ref('crm_tag_commercial_sale'), ref('crm_tag_rental')])]"/>
+            <field name="source_id" ref="source_email"/>
+            <field name="medium_id" ref="utm.utm_medium_email"/>
+        </record>
+
+        <!-- ======================================================= -->
+        <!-- OPPORTUNITIES (type = opportunity) - qualified pipeline   -->
+        <!-- ======================================================= -->
+
+        <!-- Opportunity: Qualified -->
+        <record id="opp_1" model="crm.lead">
+            <field name="name">Penthouse sale - Mivida New Cairo</field>
+            <field name="type">opportunity</field>
+            <field name="suggested_category_ids" eval="[(6, 0, [ref('trigger_estate.project_mivida')])]"/>
+            <field name="partner_id" ref="partner_buyer_sofia"/>
+            <field name="contact_name">Nour Ibrahim</field>
+            <field name="email_from">nour.ibrahim@example.com</field>
+            <field name="phone">+20 100 555 0311</field>
+            <field name="description">Nour is pre-qualified for a mortgage up to EGP 30M. Interested in the Mivida penthouse (Unit 45F) in New Cairo. Cash buyer with financing backup. Wants to schedule a private showing this weekend.</field>
+            <field name="expected_revenue">25000000.00</field>
+            <field name="probability">30</field>
+            <field name="stage_id" ref="crm.stage_lead2"/>
+            <field name="user_id" ref="base.user_admin"/>
+            <field name="team_id" ref="sales_team.team_sales_department"/>
+            <field name="priority">2</field>
+            <field name="tag_ids" eval="[(6, 0, [ref('crm_tag_residential_sale'), ref('crm_tag_luxury'), ref('crm_tag_cash_buyer')])]"/>
+            <field name="date_deadline" eval="(DateTime.now() + relativedelta(days=21)).strftime('%Y-%m-%d %H:%M:%S')"/>
+            <field name="source_id" ref="source_website"/>
+            <field name="medium_id" ref="utm.utm_medium_website"/>
+        </record>
+
+        <!-- Opportunity: Qualified -->
+        <record id="opp_2" model="crm.lead">
+            <field name="name">Investment purchase - duplex in Sheikh Zayed</field>
+            <field name="type">opportunity</field>
+            <field name="suggested_category_ids" eval="[(6, 0, [ref('trigger_estate.project_zed')])]"/>
+            <field name="partner_id" ref="partner_buyer_david"/>
+            <field name="contact_name">Khaled Sami</field>
+            <field name="email_from">k.sami@example.com</field>
+            <field name="phone">+20 100 555 0322</field>
+            <field name="description">Repeat investor looking for a cash-flowing duplex in Sheikh Zayed. Budget EGP 15M-18M. Already viewed two properties; requesting pro-forma analysis on the Beverly Hills listing.</field>
+            <field name="expected_revenue">17500000.00</field>
+            <field name="probability">35</field>
+            <field name="stage_id" ref="crm.stage_lead2"/>
+            <field name="user_id" ref="base.user_admin"/>
+            <field name="team_id" ref="sales_team.team_sales_department"/>
+            <field name="priority">2</field>
+            <field name="tag_ids" eval="[(6, 0, [ref('crm_tag_residential_sale'), ref('crm_tag_investor'), ref('crm_tag_cash_buyer')])]"/>
+            <field name="date_deadline" eval="(DateTime.now() + relativedelta(days=30)).strftime('%Y-%m-%d %H:%M:%S')"/>
+            <field name="source_id" ref="source_referral"/>
+            <field name="medium_id" ref="utm.utm_medium_direct"/>
+        </record>
+
+        <!-- Opportunity: Proposition -->
+        <record id="opp_3" model="crm.lead">
+            <field name="name">Waterfront villa listing - Marassi North Coast Estate</field>
+            <field name="type">opportunity</field>
+            <field name="suggested_category_ids" eval="[(6, 0, [ref('trigger_estate.project_marassi')])]"/>
+            <field name="partner_id" ref="partner_seller_caruso"/>
+            <field name="contact_name">Hossam Abdel-Aziz</field>
+            <field name="email_from">h.abdelaziz@example.com</field>
+            <field name="phone">+20 100 555 0233</field>
+            <field name="description">Seller agreement in progress for a 600 m2 waterfront villa in Marassi, North Coast. Direct lagoon frontage with private beach access. Listing price proposed at EGP 150M. Awaiting signed exclusivity agreement.</field>
+            <field name="expected_revenue">150000000.00</field>
+            <field name="probability">50</field>
+            <field name="stage_id" ref="crm.stage_lead3"/>
+            <field name="user_id" ref="base.user_admin"/>
+            <field name="team_id" ref="sales_team.team_sales_department"/>
+            <field name="priority">3</field>
+            <field name="tag_ids" eval="[(6, 0, [ref('crm_tag_residential_sale'), ref('crm_tag_luxury'), ref('crm_tag_waterfront')])]"/>
+            <field name="date_deadline" eval="(DateTime.now() + relativedelta(days=45)).strftime('%Y-%m-%d %H:%M:%S')"/>
+            <field name="source_id" ref="source_referral"/>
+            <field name="medium_id" ref="utm.utm_medium_direct"/>
+        </record>
+
+        <!-- Opportunity: Proposition -->
+        <record id="opp_4" model="crm.lead">
+            <field name="name">Commercial building sale - New Cairo retail</field>
+            <field name="type">opportunity</field>
+            <field name="partner_id" ref="partner_seller_marina_group"/>
+            <field name="contact_name">Nile Capital Investment Group</field>
+            <field name="email_from">investments@nilecapital.com</field>
+            <field name="phone">+20 2 2735 0244</field>
+            <field name="description">Nile Capital is selling a 1,100 m2 retail building in New Cairo. Currently 90% leased, cap rate ~9%. Asking EGP 90M. We submitted our marketing proposal; awaiting seller feedback.</field>
+            <field name="expected_revenue">90000000.00</field>
+            <field name="probability">45</field>
+            <field name="stage_id" ref="crm.stage_lead3"/>
+            <field name="user_id" ref="base.user_admin"/>
+            <field name="team_id" ref="sales_team.team_sales_department"/>
+            <field name="priority">2</field>
+            <field name="tag_ids" eval="[(6, 0, [ref('crm_tag_commercial_sale'), ref('crm_tag_investor')])]"/>
+            <field name="date_deadline" eval="(DateTime.now() + relativedelta(days=60)).strftime('%Y-%m-%d %H:%M:%S')"/>
+            <field name="source_id" ref="source_email"/>
+            <field name="medium_id" ref="utm.utm_medium_email"/>
+        </record>
+
+        <!-- Opportunity: Negotiation -->
+        <record id="opp_5" model="crm.lead">
+            <field name="name">Luxury apartment purchase - Marassi Marina</field>
+            <field name="type">opportunity</field>
+            <field name="suggested_category_ids" eval="[(6, 0, [ref('trigger_estate.project_marassi')])]"/>
+            <field name="partner_id" ref="partner_buyer_david"/>
+            <field name="contact_name">Khaled Sami</field>
+            <field name="email_from">k.sami@example.com</field>
+            <field name="phone">+20 100 555 0322</field>
+            <field name="description">Khaled made an offer of EGP 58M on a Marassi Marina apartment. Counter-offer received at EGP 62M. Inspections passed. Final price negotiation in progress; closing attorney (El-Masry &amp; Partners) is on standby.</field>
+            <field name="expected_revenue">62000000.00</field>
+            <field name="probability">75</field>
+            <field name="stage_id" ref="stage_negotiation"/>
+            <field name="user_id" ref="base.user_admin"/>
+            <field name="team_id" ref="sales_team.team_sales_department"/>
+            <field name="priority">3</field>
+            <field name="tag_ids" eval="[(6, 0, [ref('crm_tag_residential_sale'), ref('crm_tag_luxury'), ref('crm_tag_waterfront'), ref('crm_tag_cash_buyer')])]"/>
+            <field name="date_deadline" eval="(DateTime.now() + relativedelta(days=10)).strftime('%Y-%m-%d %H:%M:%S')"/>
+            <field name="source_id" ref="source_website"/>
+            <field name="medium_id" ref="utm.utm_medium_website"/>
+        </record>
+
+        <!-- Opportunity: Negotiation -->
+        <record id="opp_6" model="crm.lead">
+            <field name="name">Office lease - Maadi creative space</field>
+            <field name="type">opportunity</field>
+            <field name="partner_id" ref="partner_landlord_prestige"/>
+            <field name="contact_name">Prestige Property Management</field>
+            <field name="email_from">leasing@prestigepm-eg.com</field>
+            <field name="phone">+20 2 3760 0410</field>
+            <field name="description">Negotiating a 5-year lease for 400 m2 of creative office space in Maadi for a tech startup tenant. Landlord asking EGP 1,200/m2/month; tenant offered EGP 1,050/m2/month. Lease terms being finalized.</field>
+            <field name="expected_revenue">18000000.00</field>
+            <field name="probability">70</field>
+            <field name="stage_id" ref="stage_negotiation"/>
+            <field name="user_id" ref="base.user_admin"/>
+            <field name="team_id" ref="sales_team.team_sales_department"/>
+            <field name="priority">2</field>
+            <field name="tag_ids" eval="[(6, 0, [ref('crm_tag_commercial_sale'), ref('crm_tag_rental')])]"/>
+            <field name="date_deadline" eval="(DateTime.now() + relativedelta(days=14)).strftime('%Y-%m-%d %H:%M:%S')"/>
+            <field name="source_id" ref="source_referral"/>
+            <field name="medium_id" ref="utm.utm_medium_direct"/>
+        </record>
+
+        <!-- Opportunity: Won -->
+        <record id="opp_won_1" model="crm.lead">
+            <field name="name">SOLD - Beachfront apartment at Hacienda Bay, North Coast</field>
+            <field name="type">opportunity</field>
+            <field name="partner_id" ref="partner_buyer_sofia"/>
+            <field name="contact_name">Nour Ibrahim</field>
+            <field name="email_from">nour.ibrahim@example.com</field>
+            <field name="phone">+20 100 555 0311</field>
+            <field name="description">Closed sale on a Hacienda Bay apartment, North Coast. 3BR, direct sea views. Final sale price EGP 40M. Buyer financed through Cairo Capital Mortgage Advisors. Commission 2.5%.</field>
+            <field name="expected_revenue">40000000.00</field>
+            <field name="probability">100</field>
+            <field name="stage_id" ref="crm.stage_lead4"/>
+            <field name="user_id" ref="base.user_admin"/>
+            <field name="team_id" ref="sales_team.team_sales_department"/>
+            <field name="priority">3</field>
+            <field name="tag_ids" eval="[(6, 0, [ref('crm_tag_residential_sale'), ref('crm_tag_luxury'), ref('crm_tag_waterfront')])]"/>
+            <field name="date_closed" eval="(DateTime.now() - relativedelta(days=12)).strftime('%Y-%m-%d %H:%M:%S')"/>
+            <field name="date_deadline" eval="(DateTime.now() - relativedelta(days=12)).strftime('%Y-%m-%d %H:%M:%S')"/>
+        </record>
+
+        <!-- Opportunity: Won -->
+        <record id="opp_won_2" model="crm.lead">
+            <field name="name">SOLD - Taj Misr new-construction villa</field>
+            <field name="type">opportunity</field>
+            <field name="partner_id" ref="partner_seller_hillside"/>
+            <field name="contact_name">Taj Misr Developments</field>
+            <field name="email_from">contact@tajmisrdevelopments.com</field>
+            <field name="phone">+20 2 3854 0210</field>
+            <field name="description">Closed listing-side sale of a Taj Misr new-construction villa in Sheikh Zayed. 5BR, 400 m2. Sold at full asking price of EGP 28M after 18 days on market.</field>
+            <field name="expected_revenue">28000000.00</field>
+            <field name="probability">100</field>
+            <field name="stage_id" ref="crm.stage_lead4"/>
+            <field name="user_id" ref="base.user_admin"/>
+            <field name="team_id" ref="sales_team.team_sales_department"/>
+            <field name="priority">2</field>
+            <field name="tag_ids" eval="[(6, 0, [ref('crm_tag_residential_sale'), ref('crm_tag_luxury')])]"/>
+            <field name="date_closed" eval="(DateTime.now() - relativedelta(days=35)).strftime('%Y-%m-%d %H:%M:%S')"/>
+            <field name="date_deadline" eval="(DateTime.now() - relativedelta(days=35)).strftime('%Y-%m-%d %H:%M:%S')"/>
+        </record>
+
+        <!-- Opportunity: Lost -->
+        <record id="opp_lost_1" model="crm.lead">
+            <field name="name">New Cairo townhouse - buyer dropped out</field>
+            <field name="type">opportunity</field>
+            <field name="partner_id" ref="partner_buyer_robert"/>
+            <field name="contact_name">Omar Tarek</field>
+            <field name="email_from">omar.tarek@example.com</field>
+            <field name="phone">+20 100 555 0355</field>
+            <field name="description">Omar was interested in a New Cairo townhouse listed at EGP 12M. Mortgage application was denied by the bank due to debt-to-income ratio. Lost to competitor after buyer found a lower-priced property elsewhere.</field>
+            <field name="expected_revenue">12000000.00</field>
+            <field name="probability">0</field>
+            <field name="active" eval="False"/>
+            <field name="stage_id" ref="crm.stage_lead3"/>
+            <field name="lost_reason_id" ref="crm_lost_reason_financing"/>
+            <field name="user_id" ref="base.user_admin"/>
+            <field name="team_id" ref="sales_team.team_sales_department"/>
+            <field name="priority">1</field>
+            <field name="tag_ids" eval="[(6, 0, [ref('crm_tag_residential_sale'), ref('crm_tag_first_time_buyer')])]"/>
+            <field name="date_closed" eval="(DateTime.now() - relativedelta(days=20)).strftime('%Y-%m-%d %H:%M:%S')"/>
+        </record>
+
+    </data>
+</odoo>

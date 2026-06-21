@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data noupdate="1">
+
+        <!-- Real-estate specific CRM tags -->
+        <record id="crm_tag_residential_sale" model="crm.tag">
+            <field name="name">Residential Sale</field>
+        </record>
+        <record id="crm_tag_commercial_sale" model="crm.tag">
+            <field name="name">Commercial Sale</field>
+        </record>
+        <record id="crm_tag_rental" model="crm.tag">
+            <field name="name">Rental / Lease</field>
+        </record>
+        <record id="crm_tag_luxury" model="crm.tag">
+            <field name="name">Luxury Property</field>
+        </record>
+        <record id="crm_tag_investor" model="crm.tag">
+            <field name="name">Investor</field>
+        </record>
+        <record id="crm_tag_first_time_buyer" model="crm.tag">
+            <field name="name">First-Time Buyer</field>
+        </record>
+        <record id="crm_tag_waterfront" model="crm.tag">
+            <field name="name">Waterfront</field>
+        </record>
+        <record id="crm_tag_cash_buyer" model="crm.tag">
+            <field name="name">Cash Buyer</field>
+        </record>
+
+    </data>
+</odoo>

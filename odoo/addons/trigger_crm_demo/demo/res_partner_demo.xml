@@ -1,0 +1,211 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data noupdate="1">
+
+        <!-- ======================================================= -->
+        <!-- Trigger Real Estate - Company                            -->
+        <!-- ======================================================= -->
+        <record id="partner_trigger" model="res.partner">
+            <field name="name">Trigger Real Estate</field>
+            <field name="company_type">company</field>
+            <field name="street">90th Street North, Fifth Settlement</field>
+            <field name="city">New Cairo</field>
+            <field name="state_id" ref="base.state_eg_c"/>
+            <field name="zip">11835</field>
+            <field name="country_id" ref="base.eg"/>
+            <field name="phone">+20 2 2614 0142</field>
+            <field name="email">info@trigger-realestate.com</field>
+            <field name="website">https://www.trigger-realestate.com</field>
+            <field name="vat">EG433575922</field>
+            <field name="category_id" eval="[(4, ref('base.res_partner_category_2'))]"/>
+        </record>
+
+        <!-- Trigger internal team members (salespeople) -->
+        <record id="partner_agent_john" model="res.partner">
+            <field name="name">Ahmed Mansour</field>
+            <field name="company_type">person</field>
+            <field name="parent_id" ref="partner_trigger"/>
+            <field name="function">Senior Property Consultant</field>
+            <field name="email">ahmed.mansour@trigger-realestate.com</field>
+            <field name="phone">+20 2 2614 0188</field>
+            <field name="mobile">+20 100 555 0199</field>
+        </record>
+
+        <record id="partner_agent_lisa" model="res.partner">
+            <field name="name">Mariam Fouad</field>
+            <field name="company_type">person</field>
+            <field name="parent_id" ref="partner_trigger"/>
+            <field name="function">Luxury Estates Specialist</field>
+            <field name="email">mariam.fouad@trigger-realestate.com</field>
+            <field name="phone">+20 2 2614 0177</field>
+            <field name="mobile">+20 100 555 0166</field>
+        </record>
+
+        <record id="partner_agent_omar" model="res.partner">
+            <field name="name">Karim Adel</field>
+            <field name="company_type">person</field>
+            <field name="parent_id" ref="partner_trigger"/>
+            <field name="function">Commercial Leasing Agent</field>
+            <field name="email">karim.adel@trigger-realestate.com</field>
+            <field name="phone">+20 2 2614 0155</field>
+            <field name="mobile">+20 100 555 0144</field>
+        </record>
+
+        <!-- ======================================================= -->
+        <!-- Sellers / Property Owners (Companies & Individuals)      -->
+        <!-- ======================================================= -->
+        <record id="partner_seller_hillside" model="res.partner">
+            <field name="name">Taj Misr Developments</field>
+            <field name="company_type">company</field>
+            <field name="street">Sheikh Zayed, 26th of July Corridor</field>
+            <field name="city">Sheikh Zayed</field>
+            <field name="state_id" ref="base.state_eg_gz"/>
+            <field name="zip">12588</field>
+            <field name="country_id" ref="base.eg"/>
+            <field name="phone">+20 2 3854 0210</field>
+            <field name="email">contact@tajmisrdevelopments.com</field>
+        </record>
+
+        <record id="partner_seller_caruso" model="res.partner">
+            <field name="name">Hossam Abdel-Aziz</field>
+            <field name="company_type">person</field>
+            <field name="street">12 Road 9, Maadi</field>
+            <field name="city">Cairo</field>
+            <field name="state_id" ref="base.state_eg_c"/>
+            <field name="zip">11431</field>
+            <field name="country_id" ref="base.eg"/>
+            <field name="phone">+20 100 555 0233</field>
+            <field name="email">h.abdelaziz@example.com</field>
+        </record>
+
+        <record id="partner_seller_marina_group" model="res.partner">
+            <field name="name">Nile Capital Investment Group</field>
+            <field name="company_type">company</field>
+            <field name="street">Nile City Towers, Corniche El Nil</field>
+            <field name="city">Cairo</field>
+            <field name="state_id" ref="base.state_eg_c"/>
+            <field name="zip">11221</field>
+            <field name="country_id" ref="base.eg"/>
+            <field name="phone">+20 2 2735 0244</field>
+            <field name="email">investments@nilecapital.com</field>
+        </record>
+
+        <!-- ======================================================= -->
+        <!-- Buyers (Individuals looking to purchase/rent)           -->
+        <!-- ======================================================= -->
+        <record id="partner_buyer_sofia" model="res.partner">
+            <field name="name">Nour Ibrahim</field>
+            <field name="company_type">person</field>
+            <field name="street">South Investors Area, New Cairo</field>
+            <field name="city">New Cairo</field>
+            <field name="state_id" ref="base.state_eg_c"/>
+            <field name="zip">11835</field>
+            <field name="country_id" ref="base.eg"/>
+            <field name="phone">+20 100 555 0311</field>
+            <field name="email">nour.ibrahim@example.com</field>
+        </record>
+
+        <record id="partner_buyer_david" model="res.partner">
+            <field name="name">Khaled Sami</field>
+            <field name="company_type">person</field>
+            <field name="street">6th of October, District 4</field>
+            <field name="city">6th of October</field>
+            <field name="state_id" ref="base.state_eg_gz"/>
+            <field name="zip">12566</field>
+            <field name="country_id" ref="base.eg"/>
+            <field name="phone">+20 100 555 0322</field>
+            <field name="email">k.sami@example.com</field>
+        </record>
+
+        <record id="partner_buyer_chen_corp" model="res.partner">
+            <field name="name">El-Saeed Holding</field>
+            <field name="company_type">company</field>
+            <field name="street">Smart Village, KM 28 Cairo-Alex Road</field>
+            <field name="city">Giza</field>
+            <field name="state_id" ref="base.state_eg_gz"/>
+            <field name="zip">12577</field>
+            <field name="country_id" ref="base.eg"/>
+            <field name="phone">+20 2 2480 0333</field>
+            <field name="email">office@elsaeedholding.com</field>
+        </record>
+
+        <record id="partner_buyer_emily" model="res.partner">
+            <field name="name">Yara Hassan</field>
+            <field name="company_type">person</field>
+            <field name="street">Zamalek, 26th of July St</field>
+            <field name="city">Cairo</field>
+            <field name="state_id" ref="base.state_eg_c"/>
+            <field name="zip">11211</field>
+            <field name="country_id" ref="base.eg"/>
+            <field name="phone">+20 100 555 0344</field>
+            <field name="email">yara.hassan@example.com</field>
+        </record>
+
+        <record id="partner_buyer_robert" model="res.partner">
+            <field name="name">Omar Tarek</field>
+            <field name="company_type">person</field>
+            <field name="street">Heliopolis, El-Korba</field>
+            <field name="city">Cairo</field>
+            <field name="state_id" ref="base.state_eg_c"/>
+            <field name="zip">11341</field>
+            <field name="country_id" ref="base.eg"/>
+            <field name="phone">+20 100 555 0355</field>
+            <field name="email">omar.tarek@example.com</field>
+        </record>
+
+        <!-- ======================================================= -->
+        <!-- Landlords / Property Management Companies                -->
+        <!-- ======================================================= -->
+        <record id="partner_landlord_prestige" model="res.partner">
+            <field name="name">Prestige Property Management</field>
+            <field name="company_type">company</field>
+            <field name="street">Mohandessin, Gameat El Dewal St</field>
+            <field name="city">Giza</field>
+            <field name="state_id" ref="base.state_eg_gz"/>
+            <field name="zip">12411</field>
+            <field name="country_id" ref="base.eg"/>
+            <field name="phone">+20 2 3760 0410</field>
+            <field name="email">leasing@prestigepm-eg.com</field>
+        </record>
+
+        <record id="partner_landlord_riviera" model="res.partner">
+            <field name="name">Palm Crest Residences</field>
+            <field name="company_type">company</field>
+            <field name="street">Roushdy, Tariq El Horreya</field>
+            <field name="city">Alexandria</field>
+            <field name="state_id" ref="base.state_eg_alx"/>
+            <field name="zip">21311</field>
+            <field name="country_id" ref="base.eg"/>
+            <field name="phone">+20 3 4855 0422</field>
+            <field name="email">info@palmcrest.com</field>
+        </record>
+
+        <!-- ======================================================= -->
+        <!-- Mortgage Brokers / Lawyers / Inspectors (service partners)-->
+        <!-- ======================================================= -->
+        <record id="partner_service_mortgage" model="res.partner">
+            <field name="name">Cairo Capital Mortgage Advisors</field>
+            <field name="company_type">company</field>
+            <field name="street">Dokki, Tahrir St</field>
+            <field name="city">Giza</field>
+            <field name="state_id" ref="base.state_eg_gz"/>
+            <field name="zip">12311</field>
+            <field name="country_id" ref="base.eg"/>
+            <field name="phone">+20 2 3338 0510</field>
+            <field name="email">hello@cairocapitalmortgage.com</field>
+        </record>
+
+        <record id="partner_service_lawyer" model="res.partner">
+            <field name="name">El-Masry &amp; Partners Legal</field>
+            <field name="company_type">company</field>
+            <field name="street">Garden City, Kasr El Aini St</field>
+            <field name="city">Cairo</field>
+            <field name="state_id" ref="base.state_eg_c"/>
+            <field name="zip">11451</field>
+            <field name="country_id" ref="base.eg"/>
+            <field name="phone">+20 2 2792 0522</field>
+            <field name="email">office@elmasrylegal.com</field>
+        </record>
+
+    </data>
+</odoo>

@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data noupdate="1">
+
+        <!-- ======================================================= -->
+        <!-- Units (product.template) - the sellable inventory.       -->
+        <!-- Linked to their project via categ_id.                    -->
+        <!-- ======================================================= -->
+
+        <!-- Mivida (New Cairo) -->
+        <record id="unit_mivida_a204" model="product.template">
+            <field name="name">Mivida - Apartment A-204</field>
+            <field name="is_property" eval="True"/>
+            <field name="unit_code">MV-A204</field>
+            <field name="categ_id" ref="project_mivida"/>
+            <field name="property_type">apartment</field>
+            <field name="area_sqm">140</field>
+            <field name="bedrooms">3</field>
+            <field name="bathrooms">2</field>
+            <field name="floor">2</field>
+            <field name="list_price">7500000</field>
+            <field name="unit_state">available</field>
+        </record>
+        <record id="unit_mivida_ph45f" model="product.template">
+            <field name="name">Mivida - Penthouse 45F</field>
+            <field name="is_property" eval="True"/>
+            <field name="unit_code">MV-PH45F</field>
+            <field name="categ_id" ref="project_mivida"/>
+            <field name="property_type">apartment</field>
+            <field name="area_sqm">320</field>
+            <field name="bedrooms">4</field>
+            <field name="bathrooms">4</field>
+            <field name="floor">45</field>
+            <field name="list_price">25000000</field>
+            <field name="unit_state">reserved</field>
+        </record>
+        <record id="unit_mivida_t12" model="product.template">
+            <field name="name">Mivida - Townhouse T-12</field>
+            <field name="is_property" eval="True"/>
+            <field name="unit_code">MV-T12</field>
+            <field name="categ_id" ref="project_mivida"/>
+            <field name="property_type">townhouse</field>
+            <field name="area_sqm">220</field>
+            <field name="bedrooms">3</field>
+            <field name="bathrooms">3</field>
+            <field name="list_price">12000000</field>
+            <field name="unit_state">available</field>
+        </record>
+
+        <!-- Marassi (North Coast) -->
+        <record id="unit_marassi_villa_b12" model="product.template">
+            <field name="name">Marassi - Villa B-12</field>
+            <field name="is_property" eval="True"/>
+            <field name="unit_code">MR-VB12</field>
+            <field name="categ_id" ref="project_marassi"/>
+            <field name="property_type">villa</field>
+            <field name="area_sqm">600</field>
+            <field name="bedrooms">5</field>
+            <field name="bathrooms">6</field>
+            <field name="list_price">150000000</field>
+            <field name="unit_state">available</field>
+        </record>
+        <record id="unit_marassi_marina_m32b" model="product.template">
+            <field name="name">Marassi Marina - Apartment M-32B</field>
+            <field name="is_property" eval="True"/>
+            <field name="unit_code">MR-M32B</field>
+            <field name="categ_id" ref="project_marassi"/>
+            <field name="property_type">apartment</field>
+            <field name="area_sqm">180</field>
+            <field name="bedrooms">3</field>
+            <field name="bathrooms">3</field>
+            <field name="floor">32</field>
+            <field name="list_price">62000000</field>
+            <field name="unit_state">reserved</field>
+        </record>
+        <record id="unit_marassi_chalet_c08" model="product.template">
+            <field name="name">Marassi - Chalet C-08</field>
+            <field name="is_property" eval="True"/>
+            <field name="unit_code">MR-C08</field>
+            <field name="categ_id" ref="project_marassi"/>
+            <field name="property_type">apartment</field>
+            <field name="area_sqm">120</field>
+            <field name="bedrooms">2</field>
+            <field name="bathrooms">2</field>
+            <field name="list_price">18000000</field>
+            <field name="unit_state">sold</field>
+        </record>
+
+        <!-- ZED Towers (Sheikh Zayed) -->
+        <record id="unit_zed_z1502" model="product.template">
+            <field name="name">ZED Towers - Apartment Z-1502</field>
+            <field name="is_property" eval="True"/>
+            <field name="unit_code">ZED-1502</field>
+            <field name="categ_id" ref="project_zed"/>
+            <field name="property_type">apartment</field>
+            <field name="area_sqm">160</field>
+            <field name="bedrooms">2</field>
+            <field name="bathrooms">2</field>
+            <field name="floor">15</field>
+            <field name="list_price">14000000</field>
+            <field name="unit_state">available</field>
+        </record>
+        <record id="unit_zed_ph3" model="product.template">
+            <field name="name">ZED Towers - Duplex Z-PH3</field>
+            <field name="is_property" eval="True"/>
+            <field name="unit_code">ZED-PH3</field>
+            <field name="categ_id" ref="project_zed"/>
+            <field name="property_type">apartment</field>
+            <field name="area_sqm">280</field>
+            <field name="bedrooms">4</field>
+            <field name="bathrooms">4</field>
+            <field name="list_price">30000000</field>
+            <field name="unit_state">available</field>
+        </record>
+
+        <!-- Hacienda Bay (North Coast) -->
+        <record id="unit_hacienda_h33a" model="product.template">
+            <field name="name">Hacienda Bay - Beach Apartment H-33A</field>
+            <field name="is_property" eval="True"/>
+            <field name="unit_code">HB-33A</field>
+            <field name="categ_id" ref="project_hacienda"/>
+            <field name="property_type">apartment</field>
+            <field name="area_sqm">150</field>
+            <field name="bedrooms">3</field>
+            <field name="bathrooms">3</field>
+            <field name="list_price">40000000</field>
+            <field name="unit_state">sold</field>
+        </record>
+        <record id="unit_hacienda_villa_h7" model="product.template">
+            <field name="name">Hacienda Bay - Lagoon Villa H-7</field>
+            <field name="is_property" eval="True"/>
+            <field name="unit_code">HB-V7</field>
+            <field name="categ_id" ref="project_hacienda"/>
+            <field name="property_type">villa</field>
+            <field name="area_sqm">450</field>
+            <field name="bedrooms">5</field>
+            <field name="bathrooms">5</field>
+            <field name="list_price">95000000</field>
+            <field name="unit_state">available</field>
+        </record>
+
+    </data>
+</odoo>

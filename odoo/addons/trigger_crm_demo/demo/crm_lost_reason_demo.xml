@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data noupdate="1">
+
+        <!-- Lost reasons specific to real estate -->
+        <record id="crm_lost_reason_budget" model="crm.lost.reason">
+            <field name="name">Price / Budget too high</field>
+        </record>
+        <record id="crm_lost_reason_financing" model="crm.lost.reason">
+            <field name="name">Mortgage not approved</field>
+        </record>
+        <record id="crm_lost_reason_location" model="crm.lost.reason">
+            <field name="name">Unsuitable location</field>
+        </record>
+        <record id="crm_lost_reason_competitor" model="crm.lost.reason">
+            <field name="name">Bought through competitor</field>
+        </record>
+        <record id="crm_lost_reason_not_interested" model="crm.lost.reason">
+            <field name="name">No longer interested</field>
+        </record>
+
+    </data>
+</odoo>
