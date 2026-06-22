@@ -266,17 +266,39 @@ type UserCRMToken struct {
 
 ---
 
-## Step 4 — Identity Repo
+## Step 4 — Identity Adapter + Repo
 
-**Goal:** A repo that wraps the sqlc-generated store and returns domain types.
-The `*store.Queries` struct is injected — the repo never builds its own DB connection.
+### `app/identity/adapter/adapter.go`
+
+Pure functions that convert sqlc row structs → domain types and API request params →
+domain inputs. All conversion for the identity bounded context lives here — the same
+role that `odooclient/adapter.go` plays for the sales domain.
+
+```go
+package identityadapter
+
+import (
+    "trigger/apps/web/common/identity"
+    "trigger/apps/web/pkg/db/store"
+)
+
+func TenantFromRow(r store.Tenant) identity.Tenant
+func UserFromRow(r store.User) identity.User
+func CRMConfigFromRow(r store.CrmConfig) identity.CRMConfig
+func UserTokenFromRow(r store.UserCrmToken) identity.UserCRMToken
+```
 
 ### `app/identity/repo/repo.go`
+
+**Goal:** Raw DB operations only. The repo calls sqlc, passes results through the adapter,
+and returns domain types. No conversion logic lives here.
+The `*store.Queries` struct is injected — the repo never builds its own DB connection.
 
 ```go
 package identityrepo
 
 import (
+    "trigger/apps/web/app/identity/adapter"
     "trigger/apps/web/pkg/db/store"
 )
 
@@ -287,17 +309,6 @@ type Repo struct {
 func New(q *store.Queries) *Repo {
     return &Repo{q: q}
 }
-```
-
-### `app/identity/repo/mapper.go`
-
-Pure functions that convert sqlc row structs → domain types. No logic, just field mapping.
-
-```go
-func tenantFromRow(r store.Tenant) identity.Tenant
-func userFromRow(r store.User) identity.User
-func crmConfigFromRow(r store.CrmConfig) identity.CRMConfig
-func userTokenFromRow(r store.UserCrmToken) identity.UserCRMToken
 ```
 
 ### Methods on `Repo`
