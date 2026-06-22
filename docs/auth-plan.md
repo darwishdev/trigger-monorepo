@@ -359,64 +359,102 @@ All methods return domain types — no `store.*` types are visible to callers.
 
 ## Step 5 — WorkOS Auth Flow
 
-**Goal:** Users log in via WorkOS; Go exchanges the code and creates a session.
+**Goal:** Users log in via WorkOS AuthKit; the SDK manages the sealed session cookie.
 
-### `pkg/workos/workos.go`
+### Package
+
+No custom wrapper needed. Use the official SDK directly:
+
+```
+go get -u github.com/workos/workos-go/...
+```
+
+The SDK (v9+) uses a shared `workos.Client` with service accessors.
+WorkOS AuthKit manages the sealed session cookie — there is no custom HMAC cookie,
+no `SESSION_SECRET`, and no manual cookie rewriting.
+
+### Initialise in `main.go`
 
 ```go
-package workos
-
-type Client struct {
-    apiKey   string
-    clientID string
-    appURL   string
-    http     *http.Client
-}
-
-type Profile struct {
-    ID             string
-    Email          string
-    FirstName      string
-    LastName       string
-    OrganizationID string
-}
-
-func New(apiKey, clientID, appURL string) *Client
-
-// AuthURL returns the WorkOS OAuth redirect URL.
-func (c *Client) AuthURL(state string) string
-
-// ExchangeCode exchanges the OAuth code from the callback for a user profile.
-func (c *Client) ExchangeCode(ctx context.Context, code string) (Profile, error)
+wosClient := workos.NewClient(cfg.WorkOSAPIKey)
 ```
+
+Inject `wosClient` into the Server.
 
 ### Routes
 
 ```
-GET /login          redirect to WorkOS AuthURL
-GET /auth/callback  ExchangeCode → FindOrCreateUser → set session cookie → redirect /
-GET /logout         clear session cookie → redirect /login
+GET /login          → redirect to WorkOS AuthorizationURL
+GET /auth/callback  → AuthenticateWithCode → FindOrCreateUser → redirect /
+GET /logout         → RevokeSession → redirect /login
 ```
 
-### Session cookie
+### `/login` handler
 
-- Signed with `SESSION_SECRET` using HMAC-SHA256
-- Payload: `userID:tenantID:expiry`
-- Flags: HTTP-only, Secure, SameSite=Lax
-- Lifetime: 24 hours, refreshed on each request
+```go
+url, err := s.wos.UserManagement().GetAuthorizationURL(
+    usermanagement.GetAuthorizationURLParams{
+        ClientID:    cfg.WorkOSClientID,
+        RedirectURI: cfg.WorkOSRedirectURI,
+        Provider:    "authkit",
+    },
+)
+http.Redirect(w, r, url, http.StatusFound)
+```
+
+### `/auth/callback` handler
+
+```go
+result, err := s.wos.UserManagement().AuthenticateWithCode(ctx,
+    usermanagement.AuthenticateWithCodeParams{
+        ClientID: cfg.WorkOSClientID,
+        Code:     r.URL.Query().Get("code"),
+    },
+)
+// result.User      → WorkOS user profile (ID, Email, FirstName, LastName)
+// result.OrganizationID → maps to our tenant
+// result.SealedSession  → set as the session cookie
+
+user, err := s.identityRepo.FindOrCreateUser(ctx,
+    result.OrganizationID,
+    result.User.ID,
+    result.User.FirstName+" "+result.User.LastName,
+    result.User.Email,
+)
+
+http.SetCookie(w, &http.Cookie{
+    Name:     "wos-session",
+    Value:    result.SealedSession,
+    Path:     "/",
+    HttpOnly: true,
+    Secure:   true,
+    SameSite: http.SameSiteLaxMode,
+})
+http.Redirect(w, r, "/", http.StatusFound)
+```
+
+### `/logout` handler
+
+```go
+sessionCookie, _ := r.Cookie("wos-session")
+s.wos.UserManagement().RevokeSession(ctx, usermanagement.RevokeSessionParams{
+    SessionID: sessionCookie.Value,
+})
+http.SetCookie(w, &http.Cookie{Name: "wos-session", MaxAge: -1})
+http.Redirect(w, r, "/login", http.StatusFound)
+```
 
 ### Config additions
 
 ```
 WORKOS_API_KEY=sk_...
 WORKOS_CLIENT_ID=client_...
-APP_URL=http://localhost:8080
-SESSION_SECRET=32-random-bytes-hex
+WORKOS_REDIRECT_URI=http://localhost:8080/auth/callback
 ```
 
 ### Done when
 
-Login → WorkOS → callback → session cookie set → redirect to `/activities`.
+Login → WorkOS → callback → sealed session cookie set → redirect to `/activities`.
 Session survives a page reload.
 
 ---
@@ -474,20 +512,45 @@ func MustFromCtx(ctx context.Context) AuthUser {
 ```go
 func (s *Server) SessionMiddleware(next http.Handler) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        userID, err := s.parseSessionCookie(r)
+        cookie, err := r.Cookie("wos-session")
         if err != nil {
             http.Redirect(w, r, "/login", http.StatusFound)
             return
         }
 
-        user, err := s.identityRepo.FindUserByID(r.Context(), userID)
+        // Refresh validates the session locally when the access token is fresh.
+        // It only calls WorkOS when a token refresh is needed.
+        // Use result.Authenticated as the success signal — not err == nil.
+        session := s.wos.UserManagement().LoadSealedSession(cookie.Value)
+        result, err := session.Refresh(r.Context(), usermanagement.RefreshSessionParams{
+            ClientID: s.cfg.WorkOSClientID,
+        })
+        if err != nil || !result.Authenticated {
+            http.Redirect(w, r, "/login", http.StatusFound)
+            return
+        }
+
+        // If the session was refreshed, update the cookie with the new sealed value.
+        if result.SealedSession != "" {
+            http.SetCookie(w, &http.Cookie{
+                Name:     "wos-session",
+                Value:    result.SealedSession,
+                Path:     "/",
+                HttpOnly: true,
+                Secure:   true,
+                SameSite: http.SameSiteLaxMode,
+            })
+        }
+
+        // Look up our DB for the user's role and CRM credentials.
+        user, err := s.identityRepo.FindUserByWorkOSID(r.Context(), result.User.ID)
         if err != nil {
             http.Redirect(w, r, "/login", http.StatusFound)
             return
         }
 
         crmConfig, _ := s.identityRepo.GetCRMConfig(r.Context(), user.TenantID)
-        userToken, _ := s.identityRepo.GetUserCRMToken(r.Context(), userID)
+        userToken, _ := s.identityRepo.GetUserCRMToken(r.Context(), user.ID)
 
         token := crmConfig.APIKey
         if userToken.Token != "" {
@@ -512,6 +575,9 @@ func (s *Server) AdminMiddleware(next http.Handler) http.Handler
 
 `/login`, `/auth/callback`, `/logout`, and `/health` are exempt from `SessionMiddleware`.
 All other routes are wrapped.
+
+The cookie is only rewritten when WorkOS actually refreshes the access token
+(`result.SealedSession != ""`), not on every request.
 
 ### Done when
 
