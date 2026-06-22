@@ -282,10 +282,19 @@ import (
     "trigger/apps/web/pkg/db/store"
 )
 
-func TenantFromRow(r store.Tenant) identity.Tenant
-func UserFromRow(r store.User) identity.User
-func CRMConfigFromRow(r store.CrmConfig) identity.CRMConfig
-func UserTokenFromRow(r store.UserCrmToken) identity.UserCRMToken
+// Naming convention: {Subject}{Target}From{Source}
+//   store row → domain DTO:  TenantDtoFromSql, UserDtoFromSql, ...
+//   domain DTO → sql params: UpsertCrmConfigSqlFromDto, ...
+
+// responses (source Sql, target Dto)
+func TenantDtoFromSql(r store.Tenant) identity.Tenant
+func UserDtoFromSql(r store.User) identity.User
+func CrmConfigDtoFromSql(r store.CrmConfig) identity.CRMConfig
+func UserCrmTokenDtoFromSql(r store.UserCrmToken) identity.UserCRMToken
+
+// requests (source Dto, target Sql params)
+func UpsertCrmConfigSqlFromDto(tenantID, provider, baseURL, apiKey string) store.UpsertCRMConfigParams
+func UpsertUserCrmTokenSqlFromDto(userID, provider, token string) store.UpsertUserCRMTokenParams
 ```
 
 ### `app/identity/repo/repo.go`
