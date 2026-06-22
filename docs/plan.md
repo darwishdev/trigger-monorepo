@@ -1,476 +1,465 @@
-# Implementation Plan: Sales Domain & CRM-Agnostic Integration Layer
+# Trigger AI — Full Implementation Plan
 
-## Objective
-Establish the first business domain (`sales`) in the Go backend behind a CRM-agnostic integration layer. The `sales` domain owns the sales team's world — pipeline (`Lead`/`Opportunity`), follow-ups (`Activity`), and the catalog reps sell from (`Project`/`Unit`). External CRM systems (Odoo first, Engaz and others next) are integrated through a swappable client in `pkg/`, so the domain logic never depends on any single CRM's shape.
+## What We Are Building
 
-This is the foundation for a multi-tenant, multi-CRM platform: each tenant resolves to its own `CRMConfig`, the registry builds (and caches) a client per tenant, and the usecase orchestrates business flows against the clean domain types defined in `common/`.
+Trigger is a sales intelligence layer that sits on top of a CRM (Odoo today, others later).
+It records phone calls made by salespeople, transcribes them, enriches them with AI, and
+surfaces the results alongside the CRM's scheduled activity queue.
 
-## Architectural Principles
-- **Business-domain driven (DDD).** Bounded contexts are named after business subdomains in ubiquitous language, not technical layers or resources. `sales` is the first; `calls`, `identity`, and `insights` follow as the product grows.
-- **External systems live in `pkg/`.** The Odoo/Engaz REST APIs are foreign systems. Their clients belong in `pkg/`, and all CRM-specific JSON/quirks die at that boundary — never escaping into `app/` or `api/`.
-- **Shared contracts live in `common/`.** Domain DTOs are *our* clean, frontend-facing contracts, not external concerns. They import nothing internal.
-- **One flat interface, `ErrNotImplemented` for unsupported methods.** A provider that does not yet support a method returns `ErrNotImplemented` rather than forcing a capability-split design.
-- **Layered flow with two adapter hops.** `pkg/.../adapter.go` converts foreign JSON → domain DTO at the boundary; `app/sales/adapter/` shapes domain DTOs ↔ API request/response. Both intentional.
-- **Server-owned rendering.** HTTP handlers, routing, and `html/template` execution live on a `Server` struct (replaces the package-level closures in the current `main.go`).
+The central screen is the **Calls page**: a merged view of CRM call tasks and recorded call
+artifacts, with an extraction pipeline that adds transcript, summary, and outcome to each
+matched call.
 
-## Scope & Impact
-- **New:**
-  - `apps/web/common/sales/` — domain DTOs, `CRM` interface, `Page[T]`, `CRMConfig`, `ErrNotImplemented`.
-  - `apps/web/app/sales/usecase/` — business orchestration.
-  - `apps/web/app/sales/adapter/` — request/response shaping.
-  - `apps/web/app/sales/repo/` — reserved for the domain's own persistence (not used for the CRM external calls).
-  - `apps/web/pkg/crmclient/registry.go` — multi-provider registry with per-tenant caching.
-  - `apps/web/pkg/crmclient/odooclient/` — Odoo REST client (`client.go`, `types.go`, `adapter.go`).
-  - `apps/web/pkg/crmhttp/` — shared HTTP transport (timeout, retry, bearer auth, trace-id, typed errors).
-  - `apps/web/api/server.go` + `api/{resource}.go` — `Server` struct and handlers.
-- **Modified:** `apps/web/main.go` — wires the registry, registers the Odoo provider, constructs usecases, builds the `Server`, registers routes.
-- **Future bounded contexts (reserved names, not implemented here):** `common/calls`, `common/identity`, `common/insights` (see Business-Domain Map).
+---
 
-## Folder Layout
+## Architecture Principles
+
+- **CRM is read/write for tasks, Trigger is read/write for enrichment.** Odoo owns who needs
+  to call whom and by when. Trigger owns what was said and what happened.
+- **Domain-driven boundaries.** Bounded contexts are named after business subdomains:
+  `sales`, `calls`, `identity`, `insights`. External systems live in `pkg/` and never leak
+  into domain code.
+- **Auth context flows through every layer.** Middleware injects a typed `AuthUser` struct
+  into `context.Context`. Any layer — handler, usecase, repo — reads it via `auth.FromCtx(ctx)`.
+  No auth params in function signatures.
+- **CRM client is resolved per-request from context.** The registry builds a client from the
+  credentials in `AuthUser` (user token > tenant token > none). Usecases never query the DB
+  for tokens.
+- **One flat `sales.CRM` interface.** Providers that don't support a method return
+  `ErrNotImplemented`. No capability splitting.
+
+---
+
+## Current State (already built)
+
+| Area | Status |
+|------|--------|
+| Go web app skeleton (config, main, static, templates) | Done |
+| `common/sales` domain DTOs + `CRM` interface | Done |
+| `common/httpclient` HTTP caller | Done |
+| `pkg/crmclient` registry + per-tenant cache | Done |
+| `pkg/crmclient/odooclient` — full Odoo client (leads, projects, units, activities) | Done |
+| `app/sales` usecase + adapter | Done |
+| `api/server.go` HTMX server | Done |
+| Odoo keyset pagination (scroll_token) for activities | Done |
+| Activity list page — state/type/sort/dir filters, infinite scroll, live counter | Done |
+| Odoo `trigger_crm_api` addon (leads, projects, units, activities) | Done |
+
+---
+
+## Database Schema
+
+```sql
+-- Multi-tenant identity
+CREATE TABLE tenants (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name        TEXT NOT NULL,
+    workos_org_id TEXT UNIQUE NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE users (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id       UUID NOT NULL REFERENCES tenants(id),
+    workos_user_id  TEXT UNIQUE NOT NULL,
+    name            TEXT NOT NULL,
+    email           TEXT NOT NULL,
+    role            TEXT NOT NULL DEFAULT 'member', -- admin | member
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- CRM configuration
+CREATE TABLE crm_configs (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id   UUID NOT NULL UNIQUE REFERENCES tenants(id),
+    provider    TEXT NOT NULL DEFAULT 'none', -- odoo | none
+    base_url    TEXT,
+    api_key     TEXT,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE user_crm_tokens (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id     UUID NOT NULL UNIQUE REFERENCES users(id),
+    provider    TEXT NOT NULL,
+    token       TEXT NOT NULL,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Call records (uploaded by Android APK via Go API → Cloudflare R2)
+CREATE TABLE call_records (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id    UUID NOT NULL REFERENCES tenants(id),
+    user_id      UUID NOT NULL REFERENCES users(id),
+    phone        TEXT NOT NULL,        -- normalized E.164
+    duration_sec INT  NOT NULL,
+    started_at   TIMESTAMPTZ NOT NULL, -- from APK metadata
+    r2_url       TEXT NOT NULL,        -- public/presigned URL
+    r2_key       TEXT NOT NULL,        -- internal R2 object key
+    status       TEXT NOT NULL DEFAULT 'uploaded',
+                 -- uploaded | transcribing | transcribed | failed
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Enrichment (attached to a call_record once extraction runs)
+CREATE TABLE call_enrichments (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    call_record_id  UUID NOT NULL UNIQUE REFERENCES call_records(id),
+    transcript_text TEXT,
+    transcript_url  TEXT,   -- R2 URL of raw transcript file
+    summary         TEXT,   -- Claude-generated
+    sentiment       TEXT,   -- positive | neutral | negative
+    outcome         TEXT,   -- interested | not_interested | follow_up | no_answer
+    extracted_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX ON call_records (tenant_id, user_id, started_at DESC);
+CREATE INDEX ON call_records (phone, started_at DESC);
+```
+
+---
+
+## Auth Context (flows through every layer)
+
+### `common/auth/auth.go`
+
+```go
+package auth
+
+import "context"
+
+type Role string
+const (
+    RoleAdmin  Role = "admin"
+    RoleMember Role = "member"
+)
+
+// AuthUser is injected into every request context by SessionMiddleware.
+// It carries enough to resolve the CRM client and scope all DB queries.
+type AuthUser struct {
+    UserID   string
+    TenantID string
+    Role     Role
+    // CRM credentials — resolved once in middleware, ready to use
+    CRMProvider string // odoo | none
+    CRMBaseURL  string
+    CRMToken    string // user-level token takes priority over tenant-level
+}
+
+type ctxKey struct{}
+
+func NewCtx(ctx context.Context, u AuthUser) context.Context {
+    return context.WithValue(ctx, ctxKey{}, u)
+}
+
+func FromCtx(ctx context.Context) (AuthUser, bool) {
+    u, ok := ctx.Value(ctxKey{}).(AuthUser)
+    return u, ok
+}
+
+// MustFromCtx panics if the context has no AuthUser.
+// Use only inside handlers that are guaranteed to run after SessionMiddleware.
+func MustFromCtx(ctx context.Context) AuthUser {
+    u, ok := FromCtx(ctx)
+    if !ok {
+        panic("auth: no AuthUser in context — missing SessionMiddleware?")
+    }
+    return u
+}
+```
+
+### Middleware chain
+
+```
+request
+  │
+  ▼ SessionMiddleware
+  │  validates session cookie
+  │  loads user + tenant from DB
+  │  resolves CRM credentials (user token > tenant token)
+  │  injects AuthUser into ctx
+  │  → 401 if no valid session
+  │
+  ▼ AdminMiddleware  (applied only to admin routes)
+  │  reads AuthUser from ctx
+  │  → 403 if role != admin
+  │
+  ▼ handler
+```
+
+---
+
+## Folder Layout (target)
 
 ```
 apps/web/
-  main.go                            # composition root: registry → usecase → server → routes
-  config/                            # existing (viper-based)
-  api/
-    server.go                        # Server struct: templates, router, injected usecases
-    leads.go                         # handlers per resource (auth + validate → usecase → render HTMX)
-    activities.go
-    projects.go
-    units.go
+  main.go                        # composition root
+  config/
+  common/
+    auth/                        # AuthUser, FromCtx, NewCtx
+    sales/                       # CRM interface + domain DTOs (done)
+    calls/                       # CallRecord, CallEnrichment domain types
+    identity/                    # Tenant, User domain types
   app/
     sales/
-      usecase/
-        leads.go                     # e.g. LeadUsecase.List(ctx, tenantID, req) → []sales.Lead
-        activities.go
-        adapter/
-        leads.go                     # api-request → domain DTO; domain DTO → api-response struct
-        activities.go
-        repo/                        # reserved for own persistence (e.g. our Postgres); CRM is NOT here
-  common/
-    sales/                           # package sales — the shared, frontend-facing contract
-      crm.go                         # CRM interface, CRMConfig, ErrNotImplemented
-      lead.go activity.go project.go unit.go
-      page.go                        # generic Page[T]
-    calls/                           # (future) recorded calls, transcripts, analysis artifacts
-    identity/                        # (future) org/tenant/user, WorkOS-backed
-    insights/                        # (future) dashboards, analytics, coaching
+      usecase/                   # done
+      adapter/                   # done
+    calls/
+      usecase/                   # merge logic, extraction trigger
+      adapter/
+      repo/                      # call_records + call_enrichments queries
+    identity/
+      usecase/                   # tenant/user management
+      adapter/
+      repo/                      # tenants, users, crm_configs, user_crm_tokens
+  api/
+    server.go                    # done
+    middleware.go                # SessionMiddleware, AdminMiddleware
+    calls.go                     # calls page handler
+    config.go                    # CRM config screen handler
+    upload.go                    # R2 upload endpoint (called by Android APK)
   pkg/
-    crmclient/
-      registry.go                    # package crmclient: Registry, Register, Build, BuildCached
-      odooclient/
-        client.go                    # package odooclient: NewClient implements sales.CRM
-        types.go                     # Odoo JSON structs (mirror of _serialize_* in the Odoo controller)
-        adapter.go                   # Odoo JSON → sales DTOs (nullable handling, money, dates)
-      engazclient/                   # (future)
-    crmhttp/
-      transport.go                   # shared: timeout, retry w/ backoff, bearer auth, trace-id, typed errors
-  static/ templates/
+    crmclient/                   # done
+    db/                          # pgx pool init, migration runner
+    r2/                          # Cloudflare R2 upload client
+    workos/                      # WorkOS SDK wrapper (auth code exchange, user profile)
+  templates/
+    layout.html partials.html    # done
+    calls.html                   # calls page
+    config.html                  # CRM config + user token screen
+    login.html                   # auth screens (or WorkOS hosted)
 ```
 
-### Dependency rule (who may import whom)
+### Dependency rule
+
 ```
-api                    → app/sales/usecase, common/sales, (templates)
-app/sales/usecase      → app/sales/adapter, pkg/crmclient, common/sales
-app/sales/adapter      → common/sales                (only)
-pkg/crmclient          → common/sales                (registry only)
-pkg/crmclient/odooclient → common/sales, pkg/crmhttp
-pkg/crmhttp            → stdlib only
-common/sales           → stdlib only                 (stable contract; imports nothing internal)
-```
-`common/sales` importing nothing internal is the keystone invariant — enforce later with `depguard`.
-
-## Business-Domain Map
-Named after business subdomains (ubiquitous language), not resources or technical layers:
-
-| Context | Status | Owns | Source |
-|---|---|---|---|
-| `sales` | **now** | Pipeline (Lead/Opportunity), follow-ups (Activity), catalog (Project/Unit) | Pillars 2 + parts of 3 |
-| `calls` | future | Recorded call asset: audio, transcript, speakers, analysis artifacts | Pillar 1 (Kotlin recorder feeds this) |
-| `identity` | future | Organization↔Tenant mapping, users, teams, SSO sessions (WorkOS) | Multi-tenant core |
-| `insights` | future | Dashboards, pipeline analytics, forecasting, coaching | Pillar 4 |
-
-Deliberately **not** domains: the AI/LLM engine (a service producing artifacts owned by `calls`/`sales`), storage/TUS/R2 (plumbing — the *Recording* asset lives in `calls`), and the Redis queue / SSE / Sentry (pure infrastructure). Pillar 3 (Sales Productivity) is mostly *consumption* of `sales`+`calls` data and does not earn its own context yet.
-
-## Proposed Solution
-
-### 1. The Sales Domain Layer (`common/sales/`)
-Stable, frontend-facing contract. Derived from the real Odoo controller (`trigger_crm_api/controllers/main.py`), cleaned of all Odoo leakage. Module path prefix is `trigger/apps/web/` (go.mod:1).
-
-```go
-package sales
-
-import "time"
-
-// Money groups an amount with its currency. Odoo models expected_revenue /
-// list_price / price_from as float64 plus a currency name; we keep that shape.
-type Money struct {
-	Amount   float64
-	Currency string
-}
-
-// Page is the generic list envelope every collection endpoint returns.
-type Page[T any] struct {
-	Count   int
-	Limit   int
-	Offset  int
-	Results []T
-}
+api                → app/*/usecase, common/auth, common/*
+app/*/usecase      → app/*/adapter, app/*/repo, pkg/crmclient, common/*
+app/*/adapter      → common/*  only
+app/*/repo         → common/*  only  (receives pgx pool, returns domain types)
+pkg/crmclient      → common/sales
+pkg/db, pkg/r2, pkg/workos → stdlib + third-party only
+common/*           → stdlib only  (keystone: nothing internal)
 ```
 
-**Lead** (mirrors `GET /api/leads`, detail adds partner/team/deadline/open activities):
-```go
-type Lead struct {
-	ID              string
-	Name            string
-	Type            string // "lead" | "opportunity"
-	ContactName     string
-	Email           string
-	Phone           string
-	Stage           string
-	Budget          Money   // Odoo: expected_revenue
-	Probability     float64
-	Priority        string
-	Location        string
-	Salesperson     string
-	SalespersonID   string
-	Tags            []string
-	Active          bool
-	SuggestedProjects []ProjectRef
-}
+---
 
-type LeadDetail struct {
-	Lead
-	Partner        string
-	SalesTeam      string
-	Deadline       time.Time
-	OpenActivities []Activity
-}
+## Build Phases
 
-type ProjectRef struct {
-	ID       string
-	Name     string
-	Location string
-}
-```
+---
 
-**Project / Unit** (Project is the aggregate root; Units nest under it):
-```go
-type Project struct {
-	ID             string
-	Name           string
-	Location       string
-	Developer      string
-	DeliveryDate   time.Time
-	UnitCount      int
-	AvailableUnits int
-	PriceFrom      Money
-}
+### Phase 1 — Database + Migrations
 
-type ProjectDetail struct {
-	Project
-	Units []Unit
-}
+**Goal:** PostgreSQL running locally with all tables, accessible from Go.
 
-type Unit struct {
-	ID                string
-	Code              string
-	Name              string
-	ProjectID         string
-	Project           string
-	Type              string // apartment|villa|townhouse|office|retail
-	AreaSqm           float64
-	Bedrooms          int
-	Bathrooms         int
-	Floor             string
-	Price             Money // Odoo: list_price
-	State             string // available|reserved|sold
-}
-```
+- Set up PostgreSQL (Docker Compose service in `apps/web/docker-compose.yml`)
+- Add `pgx/v5` to `go.mod`
+- `pkg/db/db.go` — connection pool init from config (`DATABASE_URL`)
+- `pkg/db/migrate.go` — embed and run SQL migrations from `pkg/db/migrations/`
+- Migration files: `001_tenants_users.sql`, `002_crm_configs.sql`, `003_call_records.sql`
+- Config: add `DATABASE_URL` to `dev.env.example`
+- Verification: `go test ./pkg/db/...` connects and runs migrations against a test DB
 
-**Activity** (the follow-up queue; completing it in Odoo deletes the row and writes a chatter message):
-```go
-type Activity struct {
-	ID       string
-	Summary  string
-	Type     string
-	Note     string
-	Deadline time.Time
-	State    string // overdue|today|planned
-	UserID   string
-	User     string
-	LeadID   string
-	Lead     string
-}
+---
 
-type ActivityDraft struct {
-	LeadID       string
-	Summary      string
-	Note         string
-	Deadline     time.Time
-	UserID       string         // optional assignee
-	ActivityType string         // provider-resolved (Odoo xmlid or Engaz equivalent)
-}
+### Phase 2 — Identity Repos
 
-// ActivityResult is returned by CompleteActivity. Odoo maps message_id into
-// AuditRef; Engaz will map its own task reference. The domain stays stable.
-type ActivityResult struct {
-	Completed Activity
-	AuditRef  string
-}
-```
+**Goal:** Go structs and DB queries for tenants, users, CRM configs, user tokens.
 
-**Filters** (query-param shaped, provider-agnostic):
-```go
-type LeadFilter struct {
-	Type, Stage     string
-	IncludeArchived bool
-	Limit, Offset   int
-}
-type ProjectFilter struct {
-	Location      string
-	Limit, Offset int
-}
-type UnitFilter struct {
-	ProjectID, State string
-	MaxPrice         float64
-	MinBedrooms      int
-	Limit, Offset    int
-}
-type ActivityFilter struct {
-	UserID, LeadID, State string
-	Limit, Offset         int
-}
-```
+- `common/identity/` — `Tenant`, `User`, `CRMConfig`, `UserCRMToken` domain types
+- `app/identity/repo/` — typed query functions (pgx, no ORM):
+  - `FindUserByWorkOSID(ctx, workosUserID) (identity.User, error)`
+  - `FindOrCreateUser(ctx, workosUserID, tenantID, name, email) (identity.User, error)`
+  - `GetCRMConfig(ctx, tenantID) (identity.CRMConfig, error)`
+  - `UpsertCRMConfig(ctx, tenantID, provider, baseURL, apiKey) error`
+  - `GetUserCRMToken(ctx, userID) (identity.UserCRMToken, error)`
+  - `UpsertUserCRMToken(ctx, userID, provider, token) error`
+- Verification: integration tests against test DB
 
-**Interface & config** — flat, with `ErrNotImplemented` for unsupported providers:
-```go
-type CRMConfig struct {
-	Provider string // "odoo", "engaz", ...
-	BaseURL  string
-	APIKey   string
-}
+---
 
-var ErrNotImplemented = errors.New("sales: method not implemented for this provider")
+### Phase 3 — WorkOS Auth
 
-type CRM interface {
-	ListLeads(ctx context.Context, f LeadFilter) (Page[Lead], error)
-	GetLead(ctx context.Context, id string) (LeadDetail, error)
-	ListProjects(ctx context.Context, f ProjectFilter) (Page[Project], error)
-	GetProject(ctx context.Context, id string) (ProjectDetail, error)
-	ListUnits(ctx context.Context, f UnitFilter) (Page[Unit], error)
-	ListActivities(ctx context.Context, f ActivityFilter) (Page[Activity], error)
-	ScheduleActivity(ctx context.Context, draft ActivityDraft) (Activity, error)
-	CompleteActivity(ctx context.Context, id, feedback string) (ActivityResult, error)
-}
-```
+**Goal:** Users can log in via WorkOS; session cookie is set; context carries `AuthUser`.
 
-### 2. The Registry (`pkg/crmclient/registry.go`)
-Multi-provider switch with **per-tenant caching**. Wired once in `main.go`; `Build` is called per tenant at request time. The builder returns an error so malformed tenant configs fail fast.
+- `pkg/workos/workos.go` — thin wrapper:
+  - `AuthURL(redirectURI, state) string` — builds WorkOS OAuth URL
+  - `ExchangeCode(ctx, code) (WorkOSUser, error)` — exchanges code for user profile
+- `WorkOSUser` carries `ID`, `Email`, `Name`, `OrganizationID`
+- `api/middleware.go`:
+  - `SessionMiddleware` — validates signed session cookie, loads user from DB,
+    resolves CRM credentials (user token > tenant token > none), injects `AuthUser` via `auth.NewCtx`
+- Routes:
+  - `GET /login` — redirects to WorkOS hosted login
+  - `GET /auth/callback` — exchanges code, finds/creates user, sets session cookie, redirects to `/`
+  - `GET /logout` — clears cookie
+- All existing routes wrapped with `SessionMiddleware`
+- Config: `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, `APP_URL`, `SESSION_SECRET` added to `dev.env.example`
+- Verification: login flow works end-to-end in browser; session survives page reload
 
-```go
-package crmclient
+---
 
-import (
-	"fmt"
-	"sync"
+### Phase 4 — CRM Config Screen
 
-	"trigger/apps/web/common/sales"
-)
+**Goal:** Admin can connect their Odoo instance; users can add their personal token.
 
-type ClientBuilder func(cfg sales.CRMConfig) (sales.CRM, error)
+- `api/config.go`:
+  - `GET /settings` — renders config page with current CRM config for the tenant
+  - `POST /settings/crm` — admin saves tenant CRM config (provider, base_url, api_key)
+  - `POST /settings/token` — user saves their personal Odoo API token
+- `templates/config.html` — HTMX form; shows provider select (Odoo | None), base URL, API key
+- `AdminMiddleware` guards `POST /settings/crm`
+- After save, registry cache for this tenant is invalidated
+- Verification: admin connects Odoo; activities page loads real data from their instance
 
-type Registry struct {
-	mu       sync.RWMutex
-	builders map[string]ClientBuilder
-	cache    map[string]sales.CRM // keyed by tenantID
-}
+---
 
-func NewRegistry() *Registry {
-	return &Registry{
-		builders: make(map[string]ClientBuilder),
-		cache:    make(map[string]sales.CRM),
-	}
-}
+### Phase 5 — Auth-Aware CRM Resolution
 
-func (r *Registry) Register(name string, b ClientBuilder) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.builders[name] = b
-}
+**Goal:** Every CRM call uses the logged-in user's credentials, not a hardcoded config.
 
-// Build returns the client for a provider, constructing it on first use.
-func (r *Registry) Build(cfg sales.CRMConfig) (sales.CRM, error) {
-	r.mu.RLock()
-	b, ok := r.builders[cfg.Provider]
-	r.mu.RUnlock()
-	if !ok {
-		return nil, fmt.Errorf("crmclient: unsupported provider %q", cfg.Provider)
-	}
-	return b(cfg)
-}
+- Update `app/sales/usecase/` to read `AuthUser` from ctx instead of `defaultTenant`
+- `reg.Build(sales.CRMConfig{Provider: user.CRMProvider, BaseURL: user.CRMBaseURL, APIKey: user.CRMToken})`
+- Remove `defaultTenant` constant; remove hardcoded config from usecase
+- Verification: two users with different Odoo tokens see their own data
 
-// BuildCached returns the cached client for a tenant, building it on first use.
-// Subsequent calls with the same tenantID reuse the cached instance.
-func (r *Registry) BuildCached(tenantID string, cfg sales.CRMConfig) (sales.CRM, error) {
-	r.mu.RLock()
-	c, ok := r.cache[tenantID]
-	r.mu.RUnlock()
-	if ok {
-		return c, nil
-	}
-	c, err := r.Build(cfg)
-	if err != nil {
-		return nil, err
-	}
-	r.mu.Lock()
-	r.cache[tenantID] = c
-	r.mu.Unlock()
-	return c, nil
-}
-```
+---
 
-### 3. Shared HTTP Transport (`pkg/crmhttp/transport.go`)
-One helper reused by every provider client: a configured `*http.Client` with timeout, retry-with-backoff, bearer auth header injection, trace-id propagation (project-overview.md:83 — Trace IDs flow Upload → Queue → AI → CRM), and typed error mapping from Odoo's `{"error": "..."}` + status code to sentinels (`ErrAuth`, `ErrNotFound`, `ErrValidation`, `ErrServer`). Keeps `odooclient` and the future `engazclient` thin.
+### Phase 6 — Call Records Upload (Android APK integration)
 
-### 4. The Odoo Client (`pkg/crmclient/odooclient/`)
-**`types.go`** — Odoo JSON structs mirroring the controller's `_serialize_*` output exactly (`id` as int, nullable `contact_name` as `*string`, the `{count,limit,offset,results}` envelope, etc.).
+**Goal:** Android APK can upload a call recording to Trigger; a `call_record` row is created.
 
-**`adapter.go`** — pure functions converting Odoo structs → `sales` DTOs: int→string IDs, nullable unwrapping, `expected_revenue`+currency→`Money`, ISO date strings→`time.Time`, and the activity-done mapping (`message_id` → `ActivityResult.AuditRef`). This is the only place Odoo-isms live.
+- `pkg/r2/r2.go` — Cloudflare R2 upload client:
+  - `Upload(ctx, key, reader, contentType) (url string, err error)`
+  - Uses AWS S3-compatible SDK (Cloudflare R2 is S3-compatible)
+- `app/calls/repo/` — DB queries:
+  - `CreateCallRecord(ctx, tenantID, userID, phone, durationSec, startedAt, r2URL, r2Key) (CallRecord, error)`
+  - `ListCallRecords(ctx, tenantID, userID, since time.Time) ([]CallRecord, error)`
+  - `GetCallRecord(ctx, id) (CallRecord, error)`
+  - `UpdateCallStatus(ctx, id, status) error`
+- `api/upload.go`:
+  - `POST /calls/upload` — multipart form; fields: `phone`, `duration_sec`, `started_at`, `file`
+  - Reads `AuthUser` from ctx (tenantID, userID)
+  - Streams audio file to R2
+  - Creates `call_record` row
+  - Returns `{id, r2_url}` as JSON
+- Config: `R2_ACCOUNT_ID`, `R2_ACCESS_KEY`, `R2_SECRET_KEY`, `R2_BUCKET` added to `dev.env.example`
+- Auth: this endpoint is called by the APK with a user session token (Bearer), same `SessionMiddleware`
+- Verification: `curl` upload creates a DB row and the file appears in R2
 
-**`client.go`** — `NewClient(cfg sales.CRMConfig) (sales.CRM, error)` returns a `*Client` that satisfies `sales.CRM`. Uses `pkg/crmhttp` for transport. Compile-time guarantee:
-```go
-var _ sales.CRM = (*Client)(nil)
-```
+---
 
-### 5. The Sales Usecase (`app/sales/usecase/`)
-Orchestrates business flows. The registry is injected; the usecase resolves the tenant's cached CRM and calls interface methods, then hands results to the adapter for response shaping.
+### Phase 7 — Calls Page (merge CRM + records)
 
-```go
-package salesusecase
+**Goal:** Single page shows CRM call activities merged with recorded call files.
 
-import (
-	"context"
+- `common/calls/` — domain types:
+  ```go
+  type CallRecord struct {
+      ID          string
+      Phone       string
+      DurationSec int
+      StartedAt   time.Time
+      R2URL       string
+      Status      string
+      Enrichment  *CallEnrichment
+  }
 
-	"trigger/apps/web/app/sales/adapter"
-	"trigger/apps/web/common/sales"
-	"trigger/apps/web/pkg/crmclient"
-)
+  type CallEnrichment struct {
+      Transcript string
+      Summary    string
+      Sentiment  string
+      Outcome    string
+      ExtractedAt time.Time
+  }
 
-type LeadUsecase struct {
-	reg *crmclient.Registry
-}
+  // MergedCall is one row on the calls page
+  type MergedCall struct {
+      Activity    *sales.Activity  // nil if unscheduled call
+      Record      *CallRecord      // nil if no recording found
+  }
+  ```
+- `app/calls/usecase/calls.go` — merge logic:
+  ```
+  fetch activities (type=Call) from CRM via sales.CRM
+  fetch call_records from DB (user + tenant scoped)
+  for each activity: find record where phone matches lead.phone
+                     AND record.started_at within activity.deadline ± 4h
+  return []MergedCall sorted by started_at desc / deadline asc
+  ```
+- `api/calls.go` — `GET /calls` handler; keyset-paged; HTMX partial swap
+- `templates/calls.html` — merged list:
+  - Row with both sides → show recording duration, enable Extract button
+  - Row with only activity → "Not recorded" badge
+  - Row with only record → "Unscheduled call" label
+- Verification: a seeded call_record whose phone matches a CRM lead shows as merged
 
-func NewLeadUsecase(reg *crmclient.Registry) *LeadUsecase {
-	return &LeadUsecase{reg: reg}
-}
+---
 
-// List is called by api/leads.go after auth + validation.
-// tenantCfg is resolved upstream (identity/tenant store — future; config-driven for now).
-func (u *LeadUsecase) List(ctx context.Context, tenantID string, cfg sales.CRMConfig, req LeadListReq) ([]LeadView, error) {
-	crm, err := u.reg.BuildCached(tenantID, cfg)
-	if err != nil {
-		return nil, err
-	}
-	page, err := crm.ListLeads(ctx, adapter.ReqToLeadFilter(req))
-	if err != nil {
-		return nil, err
-	}
-	return adapter.LeadsToView(page.Results), nil
-}
-```
+### Phase 8 — Extraction Pipeline
 
-### 6. The Server Layer (`api/server.go`)
-`Server` owns templates and injected usecases; handlers are methods. This replaces the package-level closures in the current `main.go:59-98`.
+**Goal:** User clicks Extract; transcript and AI enrichment are added to the call record.
 
-```go
-package api
+- Background job runner — simple goroutine pool in `pkg/jobs/`:
+  - `Submit(fn func(ctx context.Context))` — queues work
+  - No external queue yet; in-process goroutines are sufficient at pre-scale
+- Extraction steps (run sequentially in background):
+  1. Fetch audio from R2 (presigned URL)
+  2. Send to transcription provider (Deepgram or Whisper API)
+  3. Save raw transcript to `call_enrichments.transcript_text`
+  4. Send transcript to Claude: prompt returns `{summary, sentiment, outcome}`
+  5. Save enrichment fields; set `call_records.status = transcribed`
+- `api/calls.go`:
+  - `POST /calls/:id/extract` — validates ownership, sets status to `transcribing`,
+    submits background job, returns 202 Accepted
+  - `GET /calls/:id/status` — returns current status as JSON (polled by HTMX)
+- `templates/calls.html` — Extract button:
+  - On click: `hx-post="/calls/:id/extract"` → button becomes spinner
+  - Spinner polls `GET /calls/:id/status` every 3s via `hx-trigger="every 3s"`
+  - On `transcribed`: swap row with enriched view (summary, sentiment badge, outcome)
+- Config: `DEEPGRAM_API_KEY` (or `OPENAI_API_KEY` for Whisper), `ANTHROPIC_API_KEY`
+- Verification: full cycle — upload → extract → enrichment visible on calls page
 
-import (
-	"html/template"
-	"net/http"
+---
 
-	"trigger/apps/web/app/sales/usecase"
-)
+### Phase 9 — Complete Activity Cycle
 
-type Server struct {
-	leads      *salesusecase.LeadUsecase
-	activities *salesusecase.ActivityUsecase
-	// future: calls, identity, insights usecases
-	homeTmpl *template.Template
-}
+**Goal:** User completes a CRM activity through Trigger (not directly in Odoo).
 
-func NewServer(leads *salesusecase.LeadUsecase, activities *salesusecase.ActivityUsecase, tmpl *template.Template) *Server {
-	return &Server{leads: leads, activities: activities, homeTmpl: tmpl}
-}
+- `api/calls.go`:
+  - `POST /calls/:id/complete` — body: `{feedback, outcome}`
+  - Calls `crm.ActivityComplete(ctx, activityID, feedback)` (already implemented in odooclient)
+  - Writes `outcome` to `call_enrichments` if a linked record exists
+  - Returns HTMX fragment updating the row (removes Complete button, shows outcome)
+- Verification: completing via Trigger removes the activity from Odoo's open list
 
-func (s *Server) Routes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /{$}", s.handleHome)
-	mux.HandleFunc("GET /health", s.handleHealth)
-	mux.HandleFunc("GET /leads", s.handleLeads) // HTMX: auth → validate → usecase → render
-	// ...
-}
-```
+---
 
-### 7. Composition Root (`main.go`)
-Registry is wired once here; per-tenant clients are built lazily on request.
+## Config Reference (all env vars)
 
-```go
-func main() {
-	cfg, err := config.LoadConfig("config")
-	if err != nil {
-		log.Fatalf("load config: %v", err)
-	}
+| Key | Phase | Description |
+|-----|-------|-------------|
+| `BASE_URL` | 1 | Odoo base URL (legacy single-tenant, removed in Phase 5) |
+| `API_KEY` | 1 | Odoo API key (legacy, removed in Phase 5) |
+| `DATABASE_URL` | 1 | PostgreSQL connection string |
+| `WORKOS_API_KEY` | 3 | WorkOS secret key |
+| `WORKOS_CLIENT_ID` | 3 | WorkOS OAuth client ID |
+| `APP_URL` | 3 | Public app URL for OAuth redirect |
+| `SESSION_SECRET` | 3 | 32-byte secret for signing session cookies |
+| `R2_ACCOUNT_ID` | 6 | Cloudflare account ID |
+| `R2_ACCESS_KEY` | 6 | R2 access key |
+| `R2_SECRET_KEY` | 6 | R2 secret key |
+| `R2_BUCKET` | 6 | R2 bucket name |
+| `DEEPGRAM_API_KEY` | 8 | Transcription API key |
+| `ANTHROPIC_API_KEY` | 8 | Claude API key for enrichment |
 
-	// 1. CRM registry + provider registration (the only place that knows about Odoo)
-	reg := crmclient.NewRegistry()
-	reg.Register("odoo", odooclient.NewClient)
-	// reg.Register("engaz", engazclient.NewClient) // future
+---
 
-	// 2. Usecases (only usecases are injected into the server)
-	leadsUC := salesusecase.NewLeadUsecase(reg)
-	activitiesUC := salesusecase.NewActivityUsecase(reg)
+## What Is Explicitly Out of Scope
 
-	// 3. Server (owns templates + rendering)
-	srv := api.NewServer(leadsUC, activitiesUC, homeTmpl)
-
-	mux := http.NewServeMux()
-	srv.Routes(mux)
-
-	log.Fatal(http.ListenAndServe(":"+cfg.Port, mux))
-}
-```
-
-### Request → HTMX response flow
-```
-GET /leads?stage=Negotiation
-  │  (auth resolves tenantID; tenant CRMConfig fetched — identity store future, config now)
-  ▼
-api/leads.go          Server.handleLeads: auth + validate → build LeadListReq
-  ▼
-app/sales/usecase     LeadUsecase.List(ctx, tenantID, cfg, req)
-  │                    adapter.ReqToLeadFilter(req) → sales.LeadFilter
-  ▼
-pkg/crmclient         Registry.BuildCached(tenantID, cfg) → sales.CRM
-  ▼
-pkg/crmclient/odoo    ListLeads → GET /api/leads → JSON
-  │                    adapter.OdooToDomain → []sales.Lead   (Odoo leakage dies here)
-  ▼
-app/sales/usecase     receives []sales.Lead
-  │                    adapter.LeadsToView(...) → []LeadView
-  ▼
-api/leads.go          render HTMX with []LeadView
-```
-
-## Known Gaps & Decisions
-- **No `GET /api/units/{id}`** in the current Odoo controller. Unit detail must either be fetched via the nested `Units` array on `GetProject`, or we add a `GET /api/units/{id}` endpoint to `trigger_crm_api/controllers/main.py`. Until decided, the `CRM` interface omits `GetUnit`.
-- **Per-tenant `CRMConfig` source.** Today it is config-driven; once the `identity` domain lands, tenant configs are fetched from the tenant store (WorkOS org → CRM mapping) and passed into the usecase by the API layer.
-- **`app/sales/repo/` is reserved.** It is NOT used for the external CRM (that goes through `pkg/crmclient` directly from the usecase). It will hold the sales domain's own persistence (e.g. cached/denormalized data in our Postgres) when needed.
-- **Cache invalidation.** `BuildCached` caches for the process lifetime. If tenant configs can change at runtime, add an invalidation/eviction path before that becomes a requirement.
-
-## Verification
-- **Factory/registry:** table-driven test — known provider returns a client; unknown provider returns the expected error; `BuildCached` returns the same instance for a repeated `tenantID`.
-- **Adapter purity:** unit-test `odooclient/adapter.go` against JSON fixtures modeled on the controller's `_serialize_*` output — nullable `contact_name`, ISO date strings, the activity-done `message_id` → `AuditRef` mapping. Commit fixtures under `pkg/crmclient/odooclient/testdata/` (not the gitignored `api_tests/responses/`).
-- **Compile-time interface satisfaction:** `var _ sales.CRM = (*odooclient.Client)(nil)` in each provider.
-- **Dependency direction:** `go list -deps ./common/sales` shows no internal app/pkg imports; add a `depguard` rule to keep it that way.
-- **Server wiring:** `go vet ./...` and `go test ./...` pass; the existing `/health` and `/` routes still respond; a new `/leads` route renders the HTMX view against a stubbed `sales.CRM`.
+- Engaz or any second CRM provider (the interface is ready; the client is not)
+- Lead, Project, Unit pages (domain + client exists; no UI planned yet)
+- Push notifications to Android APK
+- Multi-region or multi-instance deployment
+- Background job persistence (in-process goroutine pool is enough pre-scale)
+- Real-time SSE (polling is sufficient for extraction status at this scale)
