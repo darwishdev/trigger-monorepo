@@ -196,6 +196,19 @@ ON CONFLICT (user_id) DO UPDATE
 SET provider   = EXCLUDED.provider,
     token      = EXCLUDED.token,
     updated_at = now();
+
+-- name: UserAuthContextGet :one
+SELECT 
+    u.id AS user_id,
+    u.tenant_id,
+    u.role,
+    COALESCE(cc.provider, 'none')::TEXT AS crm_provider,
+    COALESCE(cc.base_url, '')::TEXT AS crm_base_url,
+    COALESCE(uct.token, cc.api_key, '')::TEXT AS crm_token
+FROM users u
+LEFT JOIN crm_configs cc ON cc.tenant_id = u.tenant_id
+LEFT JOIN user_crm_tokens uct ON uct.user_id = u.id
+WHERE u.workos_user_id = $1;
 ```
 
 ### Generate
@@ -338,6 +351,9 @@ CRMConfigUpsert(ctx, tenantID, provider, baseURL, apiKey string) error
 
 UserCRMTokenGet(ctx, userID string) (identity.UserCRMToken, error)
 UserCRMTokenUpsert(ctx, userID, provider, token string) error
+
+// UserAuthContextGet fetches complete user, role, and CRM credentials with token precedence in a single optimized DB roundtrip
+UserAuthContextGet(ctx, workosUserID string) (auth.AuthUser, error)
 ```
 
 ### Wiring in `main.go`
@@ -507,65 +523,118 @@ func MustFromCtx(ctx context.Context) AuthUser {
 }
 ```
 
-### `api/middleware.go` — SessionMiddleware
+### `api/middleware.go` — Session Middleware & authenticateOrRefresh
+
+Includes the Redis cache layers, pre-computed cache keys, and a dedicated token verification and refresh sub-function.
 
 ```go
+type SessionAuthResult struct {
+    UserID   string // The authenticated WorkOS User ID
+    CacheKey string // The ready-to-use Redis cache key (pre-hashed)
+}
+
+func (s *Server) getSessionCacheKey(cookieVal string) string {
+    return fmt.Sprintf("session:%x", sha256.Sum256([]byte(cookieVal)))
+}
+
+// authenticateOrRefresh validates the session. If expired, it refreshes the session,
+// writes the updated cookie, and returns the pre-computed ready-to-use Redis CacheKey.
+func (s *Server) authenticateOrRefresh(w http.ResponseWriter, r *http.Request, session *workos.Session, originalCookieVal string) (SessionAuthResult, error) {
+    ctx := r.Context()
+
+    // 1. Try local authentication (validates token locally via cached JWKS public keys)
+    authResult, err := session.Authenticate(ctx)
+    if err == nil && authResult.Authenticated {
+        return SessionAuthResult{
+            UserID:   authResult.User.ID,
+            CacheKey: s.getSessionCacheKey(originalCookieVal),
+        }, nil
+    }
+
+    // 2. Token Expired -> Attempt Refresh
+    log.Printf("middleware: local token is expired/invalid. Attempting session refresh...")
+    refreshResult, err := session.Refresh(ctx, workos.SessionRefreshParams{})
+    if err != nil {
+        return SessionAuthResult{}, err
+    }
+    if !refreshResult.Authenticated {
+        return SessionAuthResult{}, errors.New("refreshed session is unauthenticated")
+    }
+
+    // 3. Write refreshed cookie to response writer
+    http.SetCookie(w, &http.Cookie{
+        Name:     "wos-session",
+        Value:    refreshResult.SealedSession,
+        Path:     "/",
+        HttpOnly: true,
+        Secure:   true,
+        SameSite: http.SameSiteLaxMode,
+    })
+
+    return SessionAuthResult{
+        UserID:   refreshResult.User.ID,
+        CacheKey: s.getSessionCacheKey(refreshResult.SealedSession),
+    }, nil
+}
+
 func (s *Server) SessionMiddleware(next http.Handler) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        ctx := r.Context()
+
+        // 1. Early Return: Validate cookie presence
         cookie, err := r.Cookie("wos-session")
         if err != nil {
             http.Redirect(w, r, "/login", http.StatusFound)
             return
         }
+        cookieVal := cookie.Value
 
-        // Refresh validates the session locally when the access token is fresh.
-        // It only calls WorkOS when a token refresh is needed.
-        // Use result.Authenticated as the success signal — not err == nil.
-        session := s.wos.UserManagement().LoadSealedSession(cookie.Value)
-        result, err := session.Refresh(r.Context(), usermanagement.RefreshSessionParams{
-            ClientID: s.cfg.WorkOSClientID,
-        })
-        if err != nil || !result.Authenticated {
-            http.Redirect(w, r, "/login", http.StatusFound)
+        // Generate the original cache key
+        originalCacheKey := s.getSessionCacheKey(cookieVal)
+
+        // 2. Fast Path: Read AuthUser directly from Redis
+        if authUser, found := s.getCachedSession(ctx, originalCacheKey); found {
+            authCtx := auth.NewCtx(ctx, authUser)
+            next.ServeHTTP(w, r.WithContext(authCtx))
             return
         }
 
-        // If the session was refreshed, update the cookie with the new sealed value.
-        if result.SealedSession != "" {
-            http.SetCookie(w, &http.Cookie{
-                Name:     "wos-session",
-                Value:    result.SealedSession,
-                Path:     "/",
-                HttpOnly: true,
-                Secure:   true,
-                SameSite: http.SameSiteLaxMode,
-            })
-        }
+        // 3. Slow Path (Cache Miss): Load WorkOS session
+        session := workos.NewSession(s.wos, cookieVal, s.cfg.WorkOSCookiePassword)
 
-        // Look up our DB for the user's role and CRM credentials.
-        user, err := s.identityRepo.UserFindByWorkOSID(r.Context(), result.User.ID)
+        // 4. Early Return: Authenticate/refresh session (returns ready-to-use pre-computed cache key)
+        result, err := s.authenticateOrRefresh(w, r, session, cookieVal)
         if err != nil {
+            log.Printf("middleware: session authentication failed: %v", err)
+            s.clearSessionCookie(w)
             http.Redirect(w, r, "/login", http.StatusFound)
             return
         }
 
-        crmConfig, _ := s.identityRepo.CRMConfigGet(r.Context(), user.TenantID)
-        userToken, _ := s.identityRepo.UserCRMTokenGet(r.Context(), user.ID)
-
-        token := crmConfig.APIKey
-        if userToken.Token != "" {
-            token = userToken.Token
+        // 5. Early Return: Fetch complete user auth context using consolidated SQL query
+        authUser, err := s.identityRepo.UserAuthContextGet(ctx, result.UserID)
+        if err != nil {
+            if errors.Is(err, pgx.ErrNoRows) {
+                log.Printf("middleware: authenticated WorkOS user %s has no internal DB record", result.UserID)
+                http.Error(w, "Forbidden: User record not found.", http.StatusForbidden)
+                return
+            }
+            log.Printf("middleware: DB error fetching user auth context: %v", err)
+            http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+            return
         }
 
-        ctx := auth.NewCtx(r.Context(), auth.AuthUser{
-            UserID:      user.ID,
-            TenantID:    user.TenantID,
-            Role:        auth.Role(user.Role),
-            CRMProvider: crmConfig.Provider,
-            CRMBaseURL:  crmConfig.BaseURL,
-            CRMToken:    token,
-        })
-        next.ServeHTTP(w, r.WithContext(ctx))
+        // 6. Save resolved session context to Redis using the helper's computed ready-to-use key
+        s.setCachedSession(ctx, result.CacheKey, authUser)
+
+        // 7. If cache key changed (which implicitly means cookie was refreshed), evict the old key
+        if result.CacheKey != originalCacheKey {
+            s.evictCachedSession(ctx, originalCacheKey)
+        }
+
+        // 8. Inject final AuthUser payload into the request context and proceed
+        authCtx := auth.NewCtx(ctx, authUser)
+        next.ServeHTTP(w, r.WithContext(authCtx))
     })
 }
 
