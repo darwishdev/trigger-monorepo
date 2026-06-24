@@ -1,412 +1,440 @@
 # Calls Feature Plan
 
-Covers everything from R2 upload (Android APK integration) through the calls page
-merge logic, extraction pipeline, and completing the activity cycle back to the CRM.
+Implements native recording ingestion, call records, CRM activity matching, transcription,
+AI enrichment, the calls page, and CRM activity completion.
 
-Prerequisite: auth plan must be complete — every step here reads `AuthUser` from context.
+Prerequisites:
+
+- [infrastructure-plan.md](infrastructure-plan.md) is complete.
+- [identity-auth-plan.md](identity-auth-plan.md) is complete.
+- [security-invariants.md](security-invariants.md) applies throughout.
+- Odoo activity listing and completion described in [odoo-crm-status.md](odoo-crm-status.md)
+  remain available.
 
 ---
 
-## Step 1 — Call Records Migration
+## Feature decisions
 
-**Goal:** `call_records` and `call_enrichments` tables exist in the DB.
+- The Android recorder uses dedicated native authentication, not the browser session
+  cookie.
+- Uploads use TUS and stream to private R2 storage.
+- PostgreSQL stores R2 object keys, never public recording URLs.
+- Transcription and enrichment run through Redis/Asynq.
+- Every call record is owned by both tenant and user.
+- CRM activity matches are persisted before completion.
+- Completion never trusts an activity ID supplied by the browser.
 
-### `pkg/db/migrations/003_calls.sql`
+---
+
+## Step 1 — Native recorder authentication
+
+Define a dedicated authentication flow for the Android recorder.
+
+Required properties:
+
+- A browser-authenticated user explicitly enrolls a device.
+- Enrollment produces a one-time code or deep link.
+- The recorder exchanges it for a revocable device credential.
+- Only a hash of the device credential is stored.
+- Device records have proper tenant and user foreign keys.
+- Credentials are scoped to recorder operations and cannot access browser settings.
+- Rotation, revocation, expiry, and last-used timestamps are supported.
+- Native middleware resolves the same trusted internal `UserID` and `TenantID` shape used
+  by the calls service.
+
+Add `pkg/db/migrations/003_recorder_devices.sql`:
+
+```sql
+CREATE TABLE recorder_devices (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id       UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name            TEXT NOT NULL,
+    credential_hash BYTEA NOT NULL UNIQUE,
+    expires_at      TIMESTAMPTZ,
+    last_used_at    TIMESTAMPTZ,
+    revoked_at      TIMESTAMPTZ,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (id, tenant_id, user_id)
+);
+
+CREATE INDEX recorder_devices_owner_idx
+ON recorder_devices (tenant_id, user_id);
+```
+
+Final token format and hashing parameters must be documented during implementation.
+
+Done when:
+
+- A device can enroll, authenticate, rotate, and revoke.
+- A browser session cookie is rejected as a native bearer credential.
+- Cross-tenant and revoked-device tests pass.
+
+---
+
+## Step 2 — Calls migration
+
+Add `pkg/db/migrations/004_calls.sql`:
 
 ```sql
 CREATE TABLE call_records (
-    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id    UUID NOT NULL REFERENCES tenants(id),
-    user_id      UUID NOT NULL REFERENCES users(id),
-    phone        TEXT NOT NULL,
-    duration_sec INT  NOT NULL,
-    started_at   TIMESTAMPTZ NOT NULL,
-    r2_url       TEXT NOT NULL,
-    r2_key       TEXT NOT NULL,
-    status       TEXT NOT NULL DEFAULT 'uploaded',
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id           UUID NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
+    user_id             UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    recorder_device_id  UUID,
+    phone_e164          TEXT NOT NULL,
+    duration_sec        INT NOT NULL CHECK (duration_sec >= 0),
+    started_at          TIMESTAMPTZ NOT NULL,
+    r2_key              TEXT NOT NULL UNIQUE,
+    media_type          TEXT NOT NULL,
+    size_bytes          BIGINT NOT NULL CHECK (size_bytes >= 0),
+    upload_id           TEXT NOT NULL UNIQUE,
+    matched_activity_id TEXT,
+    status              TEXT NOT NULL DEFAULT 'uploaded'
+                        CHECK (status IN (
+                            'uploaded',
+                            'queued',
+                            'transcribing',
+                            'enriching',
+                            'completed',
+                            'failed'
+                        )),
+    failure_code        TEXT,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT call_record_user_tenant_fk
+        FOREIGN KEY (user_id, tenant_id)
+        REFERENCES users(id, tenant_id),
+    CONSTRAINT call_record_device_owner_fk
+        FOREIGN KEY (recorder_device_id, tenant_id, user_id)
+        REFERENCES recorder_devices(id, tenant_id, user_id)
 );
 
 CREATE TABLE call_enrichments (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    call_record_id  UUID NOT NULL UNIQUE REFERENCES call_records(id),
+    call_record_id  UUID NOT NULL UNIQUE
+                    REFERENCES call_records(id) ON DELETE CASCADE,
     transcript_text TEXT,
-    transcript_url  TEXT,
+    transcript_key  TEXT,
     summary         TEXT,
-    sentiment       TEXT,
-    outcome         TEXT,
-    extracted_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+    sentiment       TEXT CHECK (
+                        sentiment IS NULL OR
+                        sentiment IN ('positive', 'neutral', 'negative')
+                    ),
+    outcome         TEXT CHECK (
+                        outcome IS NULL OR
+                        outcome IN (
+                            'interested',
+                            'not_interested',
+                            'follow_up',
+                            'no_answer'
+                        )
+                    ),
+    extracted_at    TIMESTAMPTZ,
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX ON call_records (tenant_id, user_id, started_at DESC);
-CREATE INDEX ON call_records (phone, started_at DESC);
+CREATE INDEX call_records_owner_time_idx
+ON call_records (tenant_id, user_id, started_at DESC);
+
+CREATE INDEX call_records_owner_phone_time_idx
+ON call_records (tenant_id, user_id, phone_e164, started_at DESC);
 ```
 
-Call status values: `uploaded` → `transcribing` → `transcribed` | `failed`
+The identity and recorder-device migrations provide the composite unique constraints
+required by its ownership foreign keys.
+
+Done when:
+
+- FK, ownership, status, outcome, and deletion tests pass.
+- A user ID cannot be combined with another tenant ID.
 
 ---
 
-## Step 2 — Calls Domain Types
+## Step 3 — Calls domain and repository
 
-**Goal:** Clean domain types for call records and enrichments — no DB or R2 details.
-
-### `common/calls/calls.go`
+Add domain types under `common/calls`:
 
 ```go
-package calls
-
-import "time"
-
 type Status string
+
 const (
     StatusUploaded     Status = "uploaded"
+    StatusQueued       Status = "queued"
     StatusTranscribing Status = "transcribing"
-    StatusTranscribed  Status = "transcribed"
+    StatusEnriching    Status = "enriching"
+    StatusCompleted    Status = "completed"
     StatusFailed       Status = "failed"
 )
 
 type CallRecord struct {
-    ID          string
-    TenantID    string
-    UserID      string
-    Phone       string
-    DurationSec int
-    StartedAt   time.Time
-    R2URL       string
-    R2Key       string
-    Status      Status
-    CreatedAt   time.Time
-    Enrichment  *Enrichment // nil until extraction runs
-}
-
-type Enrichment struct {
-    ID             string
-    CallRecordID   string
-    TranscriptText string
-    TranscriptURL  string
-    Summary        string
-    Sentiment      string // positive | neutral | negative
-    Outcome        string // interested | not_interested | follow_up | no_answer
-    ExtractedAt    time.Time
-}
-
-// MergedCall is one row on the calls page.
-// Activity is nil for unscheduled calls (record exists, no CRM task found).
-// Record is nil for unmatched CRM tasks (no recording found).
-type MergedCall struct {
-    Activity *sales.Activity // from CRM
-    Record   *CallRecord     // from Trigger DB
+    ID                string
+    TenantID          string
+    UserID            string
+    PhoneE164         string
+    DurationSec       int
+    StartedAt         time.Time
+    R2Key             string
+    MediaType         string
+    SizeBytes         int64
+    MatchedActivityID string
+    Status            Status
+    FailureCode       string
+    CreatedAt         time.Time
+    UpdatedAt         time.Time
+    Enrichment        *Enrichment
 }
 ```
 
----
+Use sqlc through the shared store. Required repository operations:
 
-## Step 3 — Call Records Repo
-
-**Goal:** Typed DB query functions for call_records and call_enrichments.
-
-### `app/calls/repo/repo.go`
-
-```go
-package callsrepo
-
-type Repo struct{ pool *pgxpool.Pool }
-
-func New(pool *pgxpool.Pool) *Repo
+```text
+CallRecordCreateFromUpload
+CallRecordFindOwned
+CallRecordListOwned
+CallRecordStatusTransition
+CallRecordActivityMatchSet
+CallRecordActivityMatchClear
+CallEnrichmentUpsertTranscript
+CallEnrichmentUpsertAnalysis
+CallEnrichmentOutcomeUpdate
 ```
 
-### Functions to implement
+Every read and write accepts trusted tenant and user IDs. State transitions use guarded
+updates so duplicate workers cannot regress status.
 
-```go
-// write path (called after R2 upload)
-CreateCallRecord(ctx, tenantID, userID, phone string,
-                 durationSec int, startedAt time.Time,
-                 r2URL, r2Key string) (calls.CallRecord, error)
+Done when:
 
-// status updates (used by extraction pipeline)
-UpdateCallStatus(ctx, id string, status calls.Status) error
-
-// read path (called by merge usecase)
-ListCallRecords(ctx, tenantID, userID string,
-                since time.Time) ([]calls.CallRecord, error)
-
-GetCallRecord(ctx, id string) (calls.CallRecord, error)
-
-// enrichment write (called by extraction pipeline)
-UpsertEnrichment(ctx, callRecordID, transcriptText, transcriptURL,
-                 summary, sentiment, outcome string) (calls.Enrichment, error)
-```
-
-### Done when
-
-Integration tests for all functions pass.
+- Repository integration tests cover ownership and idempotent transitions.
+- No method fetches a call record by ID alone for user-facing operations.
 
 ---
 
-## Step 4 — Cloudflare R2 Client
+## Step 4 — R2 and TUS ingestion
 
-**Goal:** Go can upload files to R2; returns a public URL and internal key.
+Add `pkg/r2` for private-object operations and use a maintained TUS server implementation
+with an S3-compatible datastore.
 
-### `pkg/r2/r2.go`
+Native endpoints:
 
-R2 is S3-compatible. Use `github.com/aws/aws-sdk-go-v2/service/s3`.
-
-```go
-package r2
-
-import "context"
-
-type Client struct{ /* s3 client, bucket name */ }
-
-func New(accountID, accessKey, secretKey, bucket string) (*Client, error)
-
-// Upload streams a file to R2 and returns the public URL + internal key.
-// Key format: {tenantID}/{userID}/{timestamp}-{filename}
-func (c *Client) Upload(ctx context.Context,
-                        key string,
-                        r io.Reader,
-                        contentType string,
-                        size int64) (url string, err error)
+```text
+POST   /api/recorder/uploads
+HEAD   /api/recorder/uploads/:uploadID
+PATCH  /api/recorder/uploads/:uploadID
 ```
 
-### Config additions
+Metadata allowlist:
 
+```text
+phone
+duration_sec
+started_at
+media_type
+original_filename
+trace_id
 ```
-R2_ACCOUNT_ID=...
-R2_ACCESS_KEY=...
-R2_SECRET_KEY=...
-R2_BUCKET=trigger-calls
-```
 
-### Done when
+Server behavior:
 
-`curl` upload of a test audio file creates a readable object in R2.
+1. Authenticate the recorder device.
+2. Validate metadata and declared upload size before accepting bytes.
+3. Normalize the phone number to E.164.
+4. Build the R2 key from authenticated tenant/user IDs and server-generated identifiers.
+5. Stream chunks directly to private R2 storage.
+6. On TUS finalization, create `call_records` idempotently using `upload_id`.
+7. Enqueue processing only after the record and object are complete.
+
+Do not return a public R2 URL. API responses return the call record ID and processing
+status.
+
+Apply size, media-type, timeout, and rate limits. Never use the original filename as an
+unvalidated object-key path component.
+
+Done when:
+
+- Interrupted upload resumes from the correct offset.
+- Duplicate finalization creates one record and one processing task.
+- Cross-device and cross-tenant upload access is rejected.
 
 ---
 
-## Step 5 — Upload Endpoint (Android APK integration)
+## Step 5 — CRM activity matching
 
-**Goal:** The Android APK can upload a recorded call; a `call_record` row is created.
+The merge usecase loads:
 
-### `api/upload.go`
+- CRM call activities through the auth-aware CRM registry.
+- Call records scoped by current tenant and user.
 
-```
-POST /calls/upload
-  Auth:    SessionMiddleware (APK sends the user's session token as Bearer)
-  Content: multipart/form-data
-  Fields:
-    file         audio file (mp3 / m4a / wav)
-    phone        caller or callee number, E.164
-    duration_sec integer seconds
-    started_at   RFC3339 timestamp from the device clock
-```
+Matching inputs:
 
-Handler flow:
-1. Read `AuthUser` from ctx (tenantID, userID)
-2. Parse multipart form
-3. Build R2 key: `{tenantID}/{userID}/{started_at_unix}-{phone}.{ext}`
-4. Stream file to R2 via `r2.Client.Upload`
-5. `callsRepo.CreateCallRecord(...)` with returned URL + key
-6. Return `{"id": "...", "r2_url": "..."}` JSON
+- normalized E.164 phone;
+- activity deadline;
+- recording start time;
+- configurable matching window, initially four hours.
 
-### Done when
+Algorithm:
 
-`curl -F "file=@test.mp3" -F "phone=+201001234567" -F "duration_sec=120" -F "started_at=..." /calls/upload`
-creates a DB row and the file is accessible in R2.
+1. Index unmatched owned records by normalized phone.
+2. For each CRM call activity, choose the nearest eligible record within the window.
+3. Persist `matched_activity_id` using a guarded update.
+4. Return matched activity/record rows.
+5. Return unmatched CRM activities.
+6. Return unconsumed recording rows.
 
----
+Persisting the match makes subsequent extraction and completion deterministic. Re-matching
+must not silently overwrite an existing match; provide an explicit corrective operation
+if manual rematching is later required.
 
-## Step 6 — Merge Usecase
+Done when:
 
-**Goal:** Combine CRM call activities with call records into a single merged list.
-
-### `app/calls/usecase/calls.go`
-
-```go
-func (u *Usecase) ListMergedCalls(ctx context.Context,
-                                  req CallListReq) ([]calls.MergedCall, error) {
-    user := auth.MustFromCtx(ctx)
-
-    // 1. fetch CRM call activities (type=Call, keyset paged)
-    crm, _ := u.reg.Build(sales.CRMConfig{...from user...})
-    page, _ := crm.ActivityList(ctx, sales.ActivityFilter{Type: "Call", ...})
-
-    // 2. fetch call_records for this user, within the time window
-    records, _ := u.callsRepo.ListCallRecords(ctx, user.TenantID, user.UserID, since)
-
-    // 3. in-memory merge: match on phone + time window
-    return merge(page.Results, records), nil
-}
-```
-
-### Merge algorithm
-
-```
-index records by phone → map[phone][]CallRecord
-
-for each activity in CRM results:
-    lead_phone = activity.Lead.Phone  // may be empty
-    if lead_phone == "":
-        → MergedCall{Activity: &activity, Record: nil}  // unrecordable
-        continue
-    candidates = index[normalise(lead_phone)]
-    match = first candidate where |candidate.StartedAt - activity.Deadline| < 4h
-    → MergedCall{Activity: &activity, Record: match}  // match may be nil
-
-for each record not consumed by any activity:
-    → MergedCall{Activity: nil, Record: &record}  // unscheduled call
-```
-
-Phone numbers are normalised to E.164 before comparison.
-The 4-hour window is a constant for now; make it configurable if needed.
-
-### Done when
-
-A seeded `call_record` whose phone matches a CRM lead's phone appears as a merged row.
+- Deterministic unit tests cover multiple candidates, equal times, missing phones,
+  already-matched records, and tenant isolation.
 
 ---
 
-## Step 7 — Calls Page
+## Step 6 — Calls page
 
-**Goal:** Single page renders the merged call list with appropriate states per row.
+Route:
 
-### `api/calls.go`
-
-```
-GET /calls   keyset-paged; same HX-Request / scroll_token pattern as activities
+```text
+GET /calls
 ```
 
-### `templates/calls.html`
+Use the established HTMX content-swap, opaque-cursor, sentinel, and out-of-band counter
+patterns.
 
-Three row states:
+Row states:
 
-**Matched** (CRM activity + recording):
-```
-[Call badge] [Lead name]  [Phone]  [Duration]  [Deadline]  [Extract] [Complete]
-```
+- Matched activity and recording.
+- CRM activity without recording.
+- Recording without CRM activity.
+- Processing.
+- Completed.
+- Failed with a safe retry action where appropriate.
 
-**Unmatched CRM task** (activity, no recording):
-```
-[Call badge] [Lead name]  [Phone]  [Deadline]  [Not recorded]
-```
+Recording playback/download obtains a short-lived presigned R2 URL from an authenticated
+owned-resource endpoint. The template never embeds a permanent public URL.
 
-**Orphan record** (recording, no CRM task):
-```
-[Recording badge]  [Phone]  [Duration]  [Started at]  [Unscheduled]
-```
+Done when:
 
-Infinite scroll and live counter follow the same sentinel + OOB pattern as the activity list.
+- Pagination does not duplicate or omit rows under stable input.
+- Every recording action enforces tenant and user ownership.
 
 ---
 
-## Step 8 — Extraction Pipeline
+## Step 7 — Durable extraction pipeline
 
-**Goal:** User clicks Extract on a matched call; transcript and AI enrichment are added.
+Define Asynq task:
 
-### Job runner (`pkg/jobs/jobs.go`)
-
-Simple in-process goroutine pool — no external queue yet:
-
-```go
-package jobs
-
-type Pool struct{ sem chan struct{} }
-
-func New(concurrency int) *Pool
-func (p *Pool) Submit(fn func(ctx context.Context))
+```text
+calls.process
 ```
 
-### Extraction steps (sequential, run in background goroutine)
+Payload:
 
-```
-1. fetch audio from R2 (presigned URL, 1h expiry)
-2. POST audio to Deepgram → raw transcript JSON
-3. extract transcript text + save to call_enrichments.transcript_text
-4. save raw transcript file to R2 → save URL to call_enrichments.transcript_url
-5. POST transcript to Claude:
-      prompt → {summary, sentiment, outcome}
-6. save enrichment fields
-7. callsRepo.UpdateCallStatus(id, StatusTranscribed)
+```text
+call_record_id
+tenant_id
+user_id
+trace_id
 ```
 
-If any step fails: `UpdateCallStatus(id, StatusFailed)` + log error.
+The payload contains identifiers only.
 
-### `api/calls.go` — extraction endpoints
+Handler:
 
-```
-POST /calls/:id/extract
-  validates ownership (call_record.user_id == AuthUser.UserID)
-  sets status = transcribing
-  submits background job
-  returns 202 Accepted with HTMX fragment swapping the Extract button to a spinner
+1. Reload the owned call record.
+2. Exit successfully if already completed.
+3. Transition `queued → transcribing`.
+4. Generate a short-lived R2 read URL or stream the object.
+5. Submit audio to Deepgram.
+6. Store transcript text and raw transcript object key.
+7. Transition `transcribing → enriching`.
+8. Submit transcript to the configured enrichment service.
+9. Validate structured summary, sentiment, and outcome.
+10. Upsert enrichment.
+11. Transition to `completed`.
 
-GET /calls/:id/status
-  returns current status as JSON
-  HTMX polls this every 3s while status == transcribing
-  when status == transcribed → HTMX swaps the row with the enriched view
-```
+Failures:
 
-### Template polling pattern
+- Retry transient provider/network failures through Asynq.
+- Record a stable `failure_code` after terminal failure.
+- Never store provider keys in task payloads.
+- All writes are idempotent.
 
-```html
-<!-- spinner state, returned by POST /calls/:id/extract -->
-<div id="call-{{.ID}}-status"
-     hx-get="/calls/{{.ID}}/status"
-     hx-trigger="every 3s"
-     hx-swap="outerHTML">
-  <span class="spinner">Extracting…</span>
-</div>
-```
+Browser endpoints:
 
-When `GET /calls/:id/status` returns `transcribed`, the server returns the enriched
-row fragment (summary, sentiment badge, outcome) which replaces the spinner.
-
-### Config additions
-
-```
-DEEPGRAM_API_KEY=...
-ANTHROPIC_API_KEY=...
+```text
+POST /calls/:id/process
+GET  /calls/:id/status
 ```
 
-### Done when
+The POST route uses session authentication and strict Origin validation. It verifies
+ownership and enqueues an idempotent task. Status may use bounded HTMX polling initially;
+SSE can replace polling later without changing job semantics.
 
-Full cycle in the browser: Upload (via curl) → matched row appears → click Extract →
-spinner shows → enrichment appears with summary, sentiment badge, and outcome.
+Done when:
+
+- Worker restart and Redis retry do not duplicate enrichment.
+- Terminal failure is visible and retryable according to policy.
 
 ---
 
-## Step 9 — Complete Activity Cycle
+## Step 8 — Complete the CRM activity
 
-**Goal:** User completes a CRM activity through Trigger (not directly in Odoo).
+Route:
 
-### `api/calls.go`
-
-```
+```text
 POST /calls/:id/complete
-  Body: {feedback string, outcome string}
-  1. load call_record by id (validate ownership)
-  2. get matched activity ID from request body or record metadata
-  3. crm.ActivityComplete(ctx, activityID, feedback)  // calls Odoo, Odoo deletes it
-  4. if enrichment exists: update outcome field
-  5. return HTMX fragment: removes Complete button, shows outcome badge
 ```
 
-### Template
+Flow:
 
-```html
-<form hx-post="/calls/{{.Record.ID}}/complete" hx-swap="outerHTML" hx-target="closest article">
-  <input name="feedback" placeholder="Add a note…">
-  <select name="outcome">
-    <option value="interested">Interested</option>
-    <option value="not_interested">Not interested</option>
-    <option value="follow_up">Follow up</option>
-    <option value="no_answer">No answer</option>
-  </select>
-  <button type="submit">Complete</button>
-</form>
+1. Load the call by ID, tenant ID, and user ID.
+2. Require a persisted `matched_activity_id`.
+3. Validate feedback and outcome.
+4. Resolve the user-scoped CRM client.
+5. Call `ActivityComplete` with the persisted activity ID.
+6. Store the selected outcome and completion state idempotently.
+7. Return the updated HTMX row.
+
+The request body never supplies the authoritative activity ID.
+
+Failure semantics:
+
+- A CRM timeout leaves the local record retryable.
+- An already-completed CRM activity is reconciled idempotently where provider semantics
+  permit.
+- Local state is not marked complete before the CRM confirms completion.
+
+Done when:
+
+- Completing a matched call removes the open Odoo activity.
+- Tampered call IDs, activity IDs, cross-origin requests, and cross-tenant access fail.
+
+---
+
+## Step 9 — End-to-end verification
+
+Required scenario:
+
+```text
+device enrollment
+→ interrupted/resumed TUS upload
+→ private R2 object
+→ call record creation
+→ Asynq processing
+→ CRM activity match
+→ enriched calls row
+→ CRM activity completion
 ```
 
-### Done when
+Verify:
 
-Completing via Trigger removes the activity from Odoo's open activity list.
-The calls page row shows the outcome badge and no longer has a Complete button.
+- tenant and user isolation;
+- device revocation;
+- idempotent upload finalization;
+- idempotent task retries;
+- private object access;
+- strict Origin checks on browser mutations;
+- structured trace propagation from recorder through worker and CRM.
