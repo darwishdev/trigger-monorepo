@@ -112,6 +112,29 @@ apps/web/
 
 ---
 
+## Naming Rules
+
+To keep the codebase predictable and unified, we adhere strictly to the **`{Entity}{Action}`** naming convention across all interfaces, database queries, repository layers, and usecases. We always prefix the name with the primary business entity/noun, followed by the action/verb.
+
+### SQL Queries (sqlc name annotations)
+Always prefix the query name with the entity name:
+* `-- name: TenantFindByWorkOSOrgID :one` (not `FindTenantByWorkOSOrgID`)
+* `-- name: UserFindByWorkOSID :one` (not `FindUserByWorkOSID`)
+* `-- name: UserCreate :one` (not `CreateUser`)
+
+### Repository / Usecase Methods
+Always name methods using `{Entity}{Action}` structure:
+* `UserFindOrCreate(...)` (not `FindOrCreateUser(...)`)
+* `CRMConfigGet(...)` (not `GetCRMConfig(...)`)
+* `UserCRMTokenUpsert(...)` (not `UpsertUserCRMToken(...)`)
+
+### Adapter / Conversion Helper Functions
+Follow `{Subject}{Target}From{Source}` structure:
+* `TenantDtoFromSql`
+* `CrmConfigUpsertSqlFromDto`
+
+---
+
 ## Dependency Rule
 
 ```

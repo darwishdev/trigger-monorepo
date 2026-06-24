@@ -155,29 +155,29 @@ sql:
 ### `pkg/db/queries/identity.sql`
 
 ```sql
--- name: FindTenantByWorkOSOrgID :one
+-- name: TenantFindByWorkOSOrgID :one
 SELECT * FROM tenants WHERE workos_org_id = $1;
 
--- name: CreateTenant :one
+-- name: TenantCreate :one
 INSERT INTO tenants (name, workos_org_id)
 VALUES ($1, $2)
 RETURNING *;
 
--- name: FindUserByWorkOSID :one
+-- name: UserFindByWorkOSID :one
 SELECT * FROM users WHERE workos_user_id = $1;
 
--- name: CreateUser :one
+-- name: UserCreate :one
 INSERT INTO users (tenant_id, workos_user_id, name, email, role)
 VALUES ($1, $2, $3, $4, $5)
 RETURNING *;
 
--- name: FindUserByID :one
+-- name: UserFindByID :one
 SELECT * FROM users WHERE id = $1;
 
--- name: GetCRMConfig :one
+-- name: CRMConfigGet :one
 SELECT * FROM crm_configs WHERE tenant_id = $1;
 
--- name: UpsertCRMConfig :exec
+-- name: CRMConfigUpsert :exec
 INSERT INTO crm_configs (tenant_id, provider, base_url, api_key, updated_at)
 VALUES ($1, $2, $3, $4, now())
 ON CONFLICT (tenant_id) DO UPDATE
@@ -186,10 +186,10 @@ SET provider   = EXCLUDED.provider,
     api_key    = EXCLUDED.api_key,
     updated_at = now();
 
--- name: GetUserCRMToken :one
+-- name: UserCRMTokenGet :one
 SELECT * FROM user_crm_tokens WHERE user_id = $1;
 
--- name: UpsertUserCRMToken :exec
+-- name: UserCRMTokenUpsert :exec
 INSERT INTO user_crm_tokens (user_id, provider, token, updated_at)
 VALUES ($1, $2, $3, now())
 ON CONFLICT (user_id) DO UPDATE
@@ -284,7 +284,7 @@ import (
 
 // Naming convention: {Subject}{Target}From{Source}
 //   store row → domain DTO:  TenantDtoFromSql, UserDtoFromSql, ...
-//   domain DTO → sql params: UpsertCrmConfigSqlFromDto, ...
+//   domain DTO → sql params: CrmConfigUpsertSqlFromDto, ...
 
 // responses (source Sql, target Dto)
 func TenantDtoFromSql(r store.Tenant) identity.Tenant
@@ -293,8 +293,8 @@ func CrmConfigDtoFromSql(r store.CrmConfig) identity.CRMConfig
 func UserCrmTokenDtoFromSql(r store.UserCrmToken) identity.UserCRMToken
 
 // requests (source Dto, target Sql params)
-func UpsertCrmConfigSqlFromDto(tenantID, provider, baseURL, apiKey string) store.UpsertCRMConfigParams
-func UpsertUserCrmTokenSqlFromDto(userID, provider, token string) store.UpsertUserCRMTokenParams
+func CrmConfigUpsertSqlFromDto(tenantID, provider, baseURL, apiKey string) store.CRMConfigUpsertParams
+func UserCrmTokenUpsertSqlFromDto(userID, provider, token string) store.UserCRMTokenUpsertParams
 ```
 
 ### `app/identity/repo/repo.go`
@@ -323,21 +323,21 @@ func New(q *store.Queries) *Repo {
 ### Methods on `Repo`
 
 ```go
-FindTenantByWorkOSOrgID(ctx, orgID string) (identity.Tenant, error)
-CreateTenant(ctx, name, workosOrgID string) (identity.Tenant, error)
+TenantFindByWorkOSOrgID(ctx, orgID string) (identity.Tenant, error)
+TenantCreate(ctx, name, workosOrgID string) (identity.Tenant, error)
 
-FindUserByID(ctx, id string) (identity.User, error)
-FindUserByWorkOSID(ctx, workosUserID string) (identity.User, error)
+UserFindByID(ctx, id string) (identity.User, error)
+UserFindByWorkOSID(ctx, workosUserID string) (identity.User, error)
 
-// FindOrCreateUser: calls FindUserByWorkOSID first;
-// if pgx.ErrNoRows → calls CreateUser in the same transaction.
-FindOrCreateUser(ctx, tenantID, workosUserID, name, email string) (identity.User, error)
+// UserFindOrCreate: calls UserFindByWorkOSID first;
+// if pgx.ErrNoRows → calls UserCreate in the same transaction.
+UserFindOrCreate(ctx, tenantID, workosUserID, name, email string) (identity.User, error)
 
-GetCRMConfig(ctx, tenantID string) (identity.CRMConfig, error)
-UpsertCRMConfig(ctx, tenantID, provider, baseURL, apiKey string) error
+CRMConfigGet(ctx, tenantID string) (identity.CRMConfig, error)
+CRMConfigUpsert(ctx, tenantID, provider, baseURL, apiKey string) error
 
-GetUserCRMToken(ctx, userID string) (identity.UserCRMToken, error)
-UpsertUserCRMToken(ctx, userID, provider, token string) error
+UserCRMTokenGet(ctx, userID string) (identity.UserCRMToken, error)
+UserCRMTokenUpsert(ctx, userID, provider, token string) error
 ```
 
 ### Wiring in `main.go`
@@ -385,7 +385,7 @@ Inject `wosClient` into the Server.
 
 ```
 GET /login          → redirect to WorkOS AuthorizationURL
-GET /auth/callback  → AuthenticateWithCode → FindOrCreateUser → redirect /
+GET /auth/callback  → AuthenticateWithCode → UserFindOrCreate → redirect /
 GET /logout         → RevokeSession → redirect /login
 ```
 
@@ -415,7 +415,7 @@ result, err := s.wos.UserManagement().AuthenticateWithCode(ctx,
 // result.OrganizationID → maps to our tenant
 // result.SealedSession  → set as the session cookie
 
-user, err := s.identityRepo.FindOrCreateUser(ctx,
+user, err := s.identityRepo.UserFindOrCreate(ctx,
     result.OrganizationID,
     result.User.ID,
     result.User.FirstName+" "+result.User.LastName,
@@ -543,14 +543,14 @@ func (s *Server) SessionMiddleware(next http.Handler) http.Handler {
         }
 
         // Look up our DB for the user's role and CRM credentials.
-        user, err := s.identityRepo.FindUserByWorkOSID(r.Context(), result.User.ID)
+        user, err := s.identityRepo.UserFindByWorkOSID(r.Context(), result.User.ID)
         if err != nil {
             http.Redirect(w, r, "/login", http.StatusFound)
             return
         }
 
-        crmConfig, _ := s.identityRepo.GetCRMConfig(r.Context(), user.TenantID)
-        userToken, _ := s.identityRepo.GetUserCRMToken(r.Context(), user.ID)
+        crmConfig, _ := s.identityRepo.CRMConfigGet(r.Context(), user.TenantID)
+        userToken, _ := s.identityRepo.UserCRMTokenGet(r.Context(), user.ID)
 
         token := crmConfig.APIKey
         if userToken.Token != "" {

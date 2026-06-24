@@ -10,12 +10,12 @@ import (
 )
 
 type Config struct {
-	State        string `mapstructure:"STATE"`
-	Port         string `mapstructure:"PORT"`
-	BaseURL      string `mapstructure:"BASE_URL"`
-	DatabaseURL  string `mapstructure:"DATABASE_URL"`
-	WorkOSAPIKey string `mapstructure:"WORKOS_API_KEY"`
-
+	State          string `mapstructure:"STATE"`
+	Port           string `mapstructure:"PORT"`
+	BaseURL        string `mapstructure:"BASE_URL"`
+	DatabaseURL    string `mapstructure:"DATABASE_URL"`
+	WorkOSAPIKey   string `mapstructure:"WORKOS_API_KEY"`
+	WorkOSClientID string `mapstructure:"WORKOS_CLIENT_ID"`
 	// CRM config drives the default tenant's client until the identity
 	// domain lands and supplies per-tenant configs. Optional here so config
 	// loading stays decoupled from CRM availability.
