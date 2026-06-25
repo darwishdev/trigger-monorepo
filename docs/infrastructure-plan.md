@@ -2,7 +2,12 @@
 
 Builds shared technical foundations used by identity, calls, sales, and future features.
 This work belongs on a standalone infrastructure branch and must not deliver feature-
-specific database schemas, routes, pages, or domain behavior.
+specific database schemas, routes, pages, or domain behavior. The branch lands in small,
+sequentially reviewable PRs (one or two steps each) and is merged incrementally into
+`main`; long-lived feature branches rebase onto updated `main` rather than vendoring
+infrastructure copies. Because embedded migrations are checksummed, any feature branch
+that adds its own migration files must rebase after each infrastructure merge to keep the
+migration sequence gap-free.
 
 Mandatory rules are defined in [security-invariants.md](security-invariants.md).
 
@@ -22,6 +27,7 @@ This plan owns:
 - Strict Origin middleware for cookie-authenticated browser mutations.
 - Trusted-proxy policy.
 - Persistent job infrastructure.
+- Shared observability primitives (structured logging, trace IDs, error reporting).
 - Shared health checks and infrastructure test conventions.
 
 This plan does not own:
@@ -52,7 +58,10 @@ Requirements:
 
 - Parse and validate the DSN before constructing the pool.
 - Ping during startup with a bounded context.
-- Configure pool sizing and lifetime through environment variables.
+- Configure pool sizing and lifetime through explicit environment variables:
+  `DB_MAX_CONNS`, `DB_MIN_CONNS`, `DB_MAX_CONN_LIFETIME`, `DB_MAX_CONN_IDLE_TIME`, and
+  `DB_HEALTH_CHECK_PERIOD`. pgxpool defaults are CPU-derived and unsafe for containerized
+  multi-instance deployments; every value must be set explicitly.
 - Close the pool during graceful shutdown.
 - Development may use `sslmode=disable` locally.
 - Production must use provider-appropriate TLS verification.
@@ -75,7 +84,10 @@ Each migration:
 - runs inside a transaction;
 - is recorded by filename and SHA-256 checksum;
 - is applied exactly once;
-- causes startup failure if an already-applied file changes.
+- causes startup failure if an already-applied file changes;
+- applies files strictly by lexicographic order and fails startup on any gap between the
+  highest applied sequence number and the next candidate, forbidding mid-sequence
+  insertion of files after earlier ones have shipped.
 
 The runner:
 
@@ -94,7 +106,8 @@ Done when:
 
 ## Step 3 — sqlc foundation
 
-Install and pin sqlc in development tooling. Add:
+Pin Go 1.25 via a `go.toolchain` directive in `apps/web/go.mod`, and pin sqlc in
+development tooling. Add:
 
 ```text
 pkg/db/sqlc.yaml
@@ -116,11 +129,17 @@ sql:
         out: "store/"
         sql_package: "pgx/v5"
         emit_pointers_for_null_types: true
+        emit_json_tags: false
+        emit_interface: true
+        emit_exact_table_names: false
 ```
 
 Rules:
 
 - Generated files are committed and never edited manually.
+- `emit_*` options are one-way ratchets: chosen here before the first feature query ships
+  and changed only through a dedicated migration PR that updates every dependent
+  repository.
 - Every query name follows `{Entity}{Action}`.
 - Repositories receive shared `*store.Queries`.
 - Transactional repositories use `Queries.WithTx`.
@@ -157,7 +176,8 @@ Add `pkg/cache` with:
 - typed JSON get/set/delete operations;
 - bounded operation timeouts;
 - explicit TTLs;
-- best-effort batch eviction;
+- prefix-scoped namespace eviction as the sole batch-invalidation primitive (no tag or
+  pattern support); callers compose their own namespaces;
 - health check support.
 
 Cache policy:
@@ -234,6 +254,9 @@ Validation rules:
 - Origins are normalized once at startup, not per request.
 - Forwarded headers are trusted only when the direct peer belongs to configured proxy
   CIDRs.
+- `TRUSTED_PROXY_CIDRS` is consumed only for direct-peer validation before trusting
+  `X-Forwarded-For` (real client IP for logging and rate-limiting) and `X-Forwarded-Proto`
+  (scheme derivation); it never influences Origin or authorization decisions.
 
 Done when:
 
@@ -258,7 +281,9 @@ Cookie deletion must use the same name, path, domain, secure, and SameSite attri
 plus `MaxAge=-1` and an expiry in the past.
 
 Feature code supplies cookie name, value, and lifetime. It does not construct policy
-attributes independently.
+attributes independently. Opaque cookie values must originate from a CSPRNG or an
+SDK-sealed token (e.g. the WorkOS session); feature code never invents its own
+non-random session identifiers.
 
 Done when:
 
@@ -275,6 +300,11 @@ For `POST`, `PUT`, `PATCH`, and `DELETE`:
 - require a valid `Origin`;
 - require exact normalized scheme and host equality with `BASE_URL`;
 - require `Sec-Fetch-Site: same-origin` when the header is present;
+- additionally require either a non-CORS-safelisted `Content-Type` (e.g.
+  `application/json`) or an explicit custom request header, so that cross-site
+  `text/plain`, `application/x-www-form-urlencoded`, and `multipart/form-data`
+  submissions — which bypass CORS preflight — cannot rely on Origin forgery resistance
+  alone;
 - return 403 on missing, malformed, or mismatched values.
 
 Exclusions:
@@ -302,23 +332,53 @@ Add `pkg/jobs` with:
 - client and worker construction;
 - named queues;
 - retry and backoff defaults;
-- idempotency/task-uniqueness support;
-- graceful shutdown;
+- enqueue-time deduplication (`asynq.UniqueTTL`) and single-flight-by-resource-ID
+  (`asynq.TaskID`) options exposed to feature callers;
+- graceful shutdown with `ShutdownTimeout` sized to the longest expected task class
+  (the 8s default is unsafe for transcription and enrichment jobs);
 - structured task metadata including tenant ID, user ID, resource ID, and trace ID;
 - dead-letter/failure observability.
 
 Infrastructure defines task transport and worker lifecycle. Feature plans define task
-payloads and handlers.
+payloads, handlers, and **handler idempotency**. `pkg/jobs` guarantees at-least-once
+delivery with lease-based reprocessing on worker restart; it does not guarantee
+exactly-once execution.
 
 Do not use an in-process goroutine pool for durable product workflows.
 
 Done when:
 
-- Enqueue, process, retry, duplicate, cancellation, shutdown, and Redis restart tests pass.
+- Enqueue, process, retry, dedup-by-payload, single-flight-by-ID, cancellation,
+  shutdown, and Redis restart tests pass.
 
 ---
 
-## Step 10 — Health and verification
+## Step 10 — Observability foundation
+
+Add `pkg/observability` owning the cross-cutting telemetry primitives shared by every
+feature.
+
+- Structured logger construction (`log/slog`) with JSON output in production and
+  human-readable output in development;
+- trace-ID propagation through request context, emitted on every log line and stamped
+  onto every job payload;
+- Sentry hook installation gated on `SENTRY_DSN`, with release tagging from build
+  metadata;
+- a request logger middleware that records method, path, status, duration, and trace ID
+  and never logs cookies, tokens, or authorization headers;
+- redaction helpers that scrub configured sensitive field names before serialization.
+
+Feature plans consume these primitives; they do not instantiate their own loggers or
+error reporters.
+
+Done when:
+
+- Structured output, trace-ID propagation across HTTP and job boundaries, Sentry
+  forwarding, redaction, and "no-secret-in-log" assertion tests pass.
+
+---
+
+## Step 11 — Health and verification
 
 Add health endpoints or checks for:
 
@@ -336,6 +396,10 @@ go test ./pkg/cache/...
 go test ./pkg/secretbox/...
 go test ./pkg/httpsecurity/...
 go test ./pkg/jobs/...
+go test ./pkg/observability/...
+go vet ./...
+staticcheck ./...
+gosec ./pkg/...
 go test ./...
 ```
 
