@@ -28,6 +28,8 @@ This plan owns:
 - Trusted-proxy policy.
 - Persistent job infrastructure.
 - Shared observability primitives (structured logging, trace IDs, error reporting).
+- Application composition root and process lifecycle (construction order, signal
+  handling, ordered graceful shutdown, and the seam feature plans plug into).
 - Shared health checks and infrastructure test conventions.
 
 This plan does not own:
@@ -378,7 +380,83 @@ Done when:
 
 ---
 
-## Step 11 — Health and verification
+## Step 11 — Composition root and lifecycle
+
+`apps/web/main.go` is the sole composition root. It builds every component from Steps 1–10
+in dependency order, wires the feature application layers on top, serves until signaled,
+and tears everything down in reverse order within a bounded shutdown budget.
+
+This step owns orchestration only. It defines the seam that feature plans plug into; it
+does not define feature repositories, usecases, or handlers.
+
+Construction order — each layer receives only what its dependency rule permits:
+
+```text
+config.Config              validated once; normalized origins cached
+pkg/observability          logger, trace-ID source, Sentry hook
+pkg/db pool                pinged before anything reads it
+pkg/db migrate             runs to completion before listener or workers start
+*store.Queries             bound to the pool
+pkg/cache client           pinged
+pkg/secretbox.Box          key-version loaded
+pkg/jobs Client + Server   configured, started only after migrations succeed
+shared infra bundle        typed container passed to feature layers
+feature repos              receive *store.Queries and infra interfaces
+feature usecases           receive repos plus cache/box/jobs client
+feature HTTP/job handlers  mounted onto the router and job server
+http.Server                started last
+```
+
+Application layers communicate strictly by the dependency rules in
+[architecture-reference.md](architecture-reference.md):
+`api → app/*/usecase → app/*/repo → pkg/*`. Sibling features never import each other;
+`main.go` is the only place that knows all layers exist.
+
+Lifecycle surface (lives at `apps/web`, not under `pkg`):
+
+```go
+type App struct {
+    // wired infrastructure plus the http.Server; fields unexported
+}
+
+func bootstrap(ctx context.Context) (*App, error) // build in order above; fail fast
+func (a *App) Run(ctx context.Context) error      // serve until ctx is cancelled
+func (a *App) Shutdown(ctx context.Context) error  // reverse-order teardown within ctx
+```
+
+Registration seam:
+
+- A `Module` (or equivalent) interface lets each feature plan mount its HTTP routes onto
+  the shared router and register its Asynq handlers on the job server, without the
+  composition root knowing feature internals.
+- The infra branch ships a runnable skeleton with no feature modules mounted: it boots,
+  runs migrations, serves `/health`, 404s everything else, and shuts down cleanly.
+
+Graceful shutdown:
+
+- `signal.NotifyContext` traps `SIGINT`/`SIGTERM` and cancels the root context.
+- Teardown runs in reverse construction order: HTTP `Shutdown` (drain in-flight requests)
+  → job server `Shutdown` (drain active tasks within its `ShutdownTimeout`) → job client
+  `Close` → Redis `Close` → pgxpool `Close` → logger/Sentry flush.
+- A total `SHUTDOWN_BUDGET` bounds the whole sequence; each component receives a sub-budget
+  derived from it.
+- A partial startup failure tears down already-constructed components in reverse before
+  exiting non-zero; `Shutdown` is idempotent and safe to call after a partial bootstrap.
+- Workers start only after migrations succeed; the HTTP listener accepts traffic only after
+  all health dependencies are ready.
+
+Done when:
+
+- Clean startup → serve → signal → drain → exit tests pass.
+- Signal-during-startup, signal-during-active-request, and signal-during-active-job tests
+  prove ordered drain within budget.
+- A component construction failure leaves no leaked resources and exits non-zero.
+- The skeleton binary with no feature modules mounted boots, migrates, serves `/health`,
+  and shuts down cleanly.
+
+---
+
+## Step 12 — Health and verification
 
 Add health endpoints or checks for:
 
